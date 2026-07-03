@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../lossless_tx"
+		},
+		{
+			"name": "lossless_rx",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
