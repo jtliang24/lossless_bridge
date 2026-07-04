@@ -8,25 +8,26 @@ using namespace audio_tools;
 USBAudioStream usbAudio;
 
 void setup() {
-    Serial.begin(115200);
-    delay(2000); 
-    
-    // Enable logging to confirm the S3 USB hardware initialized correctly
-    AudioLogger::instance().begin(Serial, AudioLogger::Info);
-
-    Serial.println("\n--- Initializing with USBAudioDeviceESP32.h ---");
-
     // Configure the audio stream (RX_MODE: Host PC -> Dongle)
     auto config = usbAudio.defaultConfig(RX_MODE);
     config.sample_rate = 44100;
     config.channels = 2;
     config.bits_per_sample = 16;
+    
+    // Set custom USB device names
+    config.manufacturer = "SEEED";
+    config.product = "SEEED Audio Device";
+    
+    // Change VID, PID and Serial to force Windows to clear its device name cache
+    config.vid = 0xcafe;
+    config.pid = 0x4005;
+    config.serial = "000002";
+    
+    // Start the USB stack automatically during begin()
     config.begin_usb = true;
     
     // Initialize the S3 USB peripheral
     usbAudio.begin(config);
-
-    Serial.println("Driver loaded: USBAudioDeviceESP32 ready.");
 }
 
 void loop() {
@@ -36,8 +37,7 @@ void loop() {
     // The driver populates the buffer automatically from the USB hardware
     size_t bytes_read = usbAudio.readBytes(buffer, sizeof(buffer));
     
-    if (bytes_read > 0) {
-        // You are now capturing raw PCM data at the source.
-        Serial.printf("Captured %d bytes of PCM data\n", bytes_read);
+    if (bytes_read == 0) {
+        delay(1);
     }
 }
