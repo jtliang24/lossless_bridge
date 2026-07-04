@@ -1,0 +1,23 @@
+# ESP-IDF Build artifacts
+build/
+build_*_*/
+
+# ESP-IDF Configuration
+sdkconfig
+sdkconfig.old
+sdkconfig.temp
+
+# Component Manager dependencies
+managed_components/
+
+# PlatformIO build directories
+.pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+
+# VS Code and editor settings
+.vscode/
+.idea/
+cmake-build-*/
