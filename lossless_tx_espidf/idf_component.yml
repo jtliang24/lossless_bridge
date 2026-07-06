@@ -1,2 +1,2 @@
 dependencies:
-  espressif/usb_device_uac: "^1.0.0"
+  espressif/usb_device_uac

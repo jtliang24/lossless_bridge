@@ -3605,6 +3605,78 @@ CONFIG_WL_SECTOR_SIZE_4096=y
 # default:
 CONFIG_WL_SECTOR_SIZE=4096
 # end of Wear Levelling
+
+#
+# CMake Utilities
+#
+# default:
+# CONFIG_CU_RELINKER_ENABLE is not set
+# default:
+# CONFIG_CU_DIAGNOSTICS_COLOR_NEVER is not set
+# default:
+CONFIG_CU_DIAGNOSTICS_COLOR_ALWAYS=y
+# default:
+# CONFIG_CU_DIAGNOSTICS_COLOR_AUTO is not set
+# default:
+# CONFIG_CU_GCC_LTO_ENABLE is not set
+# default:
+# CONFIG_CU_GCC_STRING_1BYTE_ALIGN is not set
+# end of CMake Utilities
+
+#
+# USB Device UAC Configuration
+#
+
+#
+# USB Device UAC
+#
+# default:
+CONFIG_USB_DEVICE_UAC_AS_PART=y
+# default:
+CONFIG_UAC_SPEAKER_CHANNEL_NUM=1
+# default:
+CONFIG_UAC_MIC_CHANNEL_NUM=1
+# default:
+CONFIG_UAC_SAMPLE_RATE=48000
+# default:
+CONFIG_UAC_BIT_RESOLUTION_16=y
+# default:
+# CONFIG_UAC_BIT_RESOLUTION_24_IN_24 is not set
+# default:
+# CONFIG_UAC_BIT_RESOLUTION_24_IN_32 is not set
+# default:
+# CONFIG_UAC_BIT_RESOLUTION_32 is not set
+# default:
+CONFIG_UAC_BIT_RESOLUTION=16
+# default:
+CONFIG_UAC_BYTES_PER_SAMPLE=2
+# default:
+CONFIG_UAC_SPK_INTERVAL_MS=10
+# default:
+CONFIG_UAC_MIC_INTERVAL_MS=10
+# default:
+CONFIG_UAC_SPK_NEW_PLAY_INTERVAL=100
+# default:
+# CONFIG_UAC_SUPPORT_MACOS is not set
+
+#
+# UAC Task Config
+#
+# default:
+CONFIG_UAC_TINYUSB_TASK_PRIORITY=5
+# default:
+CONFIG_UAC_TINYUSB_TASK_CORE=-1
+# default:
+CONFIG_UAC_SPK_TASK_PRIORITY=5
+# default:
+CONFIG_UAC_SPK_TASK_CORE=-1
+# default:
+CONFIG_UAC_MIC_TASK_PRIORITY=5
+# default:
+CONFIG_UAC_MIC_TASK_CORE=-1
+# end of UAC Task Config
+# end of USB Device UAC
+# end of USB Device UAC Configuration
 # end of Component config
 
 # default:

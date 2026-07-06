@@ -1,0 +1,2 @@
+dependencies:
+  espressif/usb_device_uac: ">=0.0.1"
