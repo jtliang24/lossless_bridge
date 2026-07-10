@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -66,7 +67,7 @@ static esp_err_t init_i2s(void) {
             },
         },
     };
-    std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_32BIT;
+    std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
 
     ret = i2s_channel_init_std_mode(tx_chan, &std_cfg);
     if (ret != ESP_OK) {
@@ -89,11 +90,12 @@ static esp_err_t init_i2s(void) {
 static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *cb_ctx) {
     feed_watchdog();
     
+    size_t bytes_written = 0;
+#if CONFIG_UAC_SPEAKER_CHANNEL_NUM == 1
     // Convert mono 16-bit to stereo 16-bit
     size_t mono_samples_count = len / 2;
     static int16_t stereo_buf[1920]; // 10ms at 48kHz mono is 480 samples. Stereo needs 960 samples (1920 bytes).
     
-    size_t bytes_written = 0;
     if (mono_samples_count * 2 <= sizeof(stereo_buf) / sizeof(stereo_buf[0])) {
         int16_t *mono_samples = (int16_t *)buf;
         for (size_t i = 0; i < mono_samples_count; i++) {
@@ -105,11 +107,19 @@ static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *cb_ctx) {
             i2s_channel_write(tx_chan, stereo_buf, mono_samples_count * 4, &bytes_written, portMAX_DELAY);
         }
     }
+#elif CONFIG_UAC_SPEAKER_CHANNEL_NUM == 2
+    // Already stereo 16-bit, write directly to I2S
+    if (tx_chan) {
+        i2s_channel_write(tx_chan, buf, len, &bytes_written, portMAX_DELAY);
+    }
+#else
+#error "Unsupported CONFIG_UAC_SPEAKER_CHANNEL_NUM"
+#endif
     
     // For demonstration, we just log a message periodically
     static int output_cnt = 0;
     if (output_cnt++ % 100 == 0) {
-        ESP_LOGI(TAG, "Speaker output: received %d bytes mono, wrote %d bytes stereo to I2S", len, bytes_written);
+        ESP_LOGI(TAG, "Speaker output: received %d bytes, wrote %d bytes to I2S", len, bytes_written);
     }
     return ESP_OK;
 }
