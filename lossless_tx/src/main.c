@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -179,6 +180,10 @@ void app_main() {
         .set_mute_cb = uac_device_set_mute_cb,
         .set_volume_cb = uac_device_set_volume_cb,
         .cb_ctx = NULL,
+#if CONFIG_USB_DEVICE_UAC_AS_PART
+        .spk_itf_num = 1,
+        .mic_itf_num = 2,
+#endif
     };
     ESP_ERROR_CHECK(uac_device_init(&config));
     
