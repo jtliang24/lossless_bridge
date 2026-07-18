@@ -5,6 +5,7 @@
 #include <esp_arduino_version.h>
 #include "driver/i2s_std.h"
 #include "esp_mac.h"
+#define ENABLE_DEBUG_LOGS 0 // Set to 1 to enable verbose debugging
 
 #define STATUS_LED_PIN GPIO_NUM_21 // active-low LED on Seeed Studio XIAO ESP32S3
 
@@ -135,15 +136,18 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
 #endif
     last_packet_time = millis();
 
+#if ENABLE_DEBUG_LOGS
     static uint32_t last_raw_recv_time = 0;
     if (millis() - last_raw_recv_time >= 1000) {
         last_raw_recv_time = millis();
         Serial.printf("Raw ESP-NOW recv: len=%d from %02X:%02X:%02X:%02X:%02X:%02X\n",
                       len, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
+#endif
 
     if (len == sizeof(tx_confirm_packet_t)) {
         const tx_confirm_packet_t* conf = (const tx_confirm_packet_t*)incomingBytes;
+#if ENABLE_DEBUG_LOGS
         Serial.printf("DEBUG: Received 24-byte packet. Magic: '%.8s' | Hex: %02X %02X %02X %02X %02X %02X %02X %02X | Seq: %lu\n",
                       conf->magic, 
                       conf->magic[0], conf->magic[1], conf->magic[2], conf->magic[3],
@@ -154,6 +158,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                       conf->transmitter_mac[3], conf->transmitter_mac[4], conf->transmitter_mac[5],
                       conf->receiver_mac[0], conf->receiver_mac[1], conf->receiver_mac[2],
                       conf->receiver_mac[3], conf->receiver_mac[4], conf->receiver_mac[5]);
+#endif
         
         bool is_magic_match = (conf->magic[0] == 'T' && conf->magic[1] == 'X' && conf->magic[2] == '_' && 
                                conf->magic[3] == 'C' && conf->magic[4] == 'O' && conf->magic[5] == 'N' && 
@@ -162,7 +167,9 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                                conf->magic[3] == 'T' && conf->magic[4] == '_' && conf->magic[5] == 'U' && 
                                conf->magic[6] == 'N' && conf->magic[7] == 'I');
                                
+#if ENABLE_DEBUG_LOGS
         Serial.printf("DEBUG: is_magic_match: %d | sender_known: %d\n", is_magic_match, sender_known);
+#endif
         if (is_magic_match) {
             if (!sender_known || memcmp(sender_mac, conf->transmitter_mac, 6) != 0) {
                 esp_now_peer_info_t peer;
@@ -190,9 +197,11 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
 
                     memcpy(sender_mac, conf->transmitter_mac, 6);
                     sender_known = true;
+#if ENABLE_DEBUG_LOGS
                     Serial.printf("Successfully registered Transmitter peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
                                   sender_mac[0], sender_mac[1], sender_mac[2],
                                   sender_mac[3], sender_mac[4], sender_mac[5]);
+#endif
                 } else {
                     Serial.printf("Failed to register Transmitter peer: %s\n", esp_err_to_name(err));
                 }
@@ -281,7 +290,9 @@ void i2s_playback_task(void *pvParameters) {
         if (prebuffering) {
             if (ring_buffer.available() >= prebuffer_bytes) {
                 prebuffering = false;
+#if ENABLE_DEBUG_LOGS
                 Serial.println("Buffering complete. Playback started.");
+#endif
             } else {
                 // Write silence to prevent clock issues
                 size_t written = 0;
@@ -294,7 +305,9 @@ void i2s_playback_task(void *pvParameters) {
                 // Buffer underflow
                 prebuffering = true;
                 ring_buffer.clear();
+#if ENABLE_DEBUG_LOGS
                 Serial.println("Buffer underflow. Buffering...");
+#endif
                 stats_underflows++;
                 size_t written = 0;
                 i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
@@ -415,7 +428,9 @@ void loop() {
         uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         esp_err_t send_err = esp_now_send(broadcast_mac, (uint8_t*)&beacon, sizeof(beacon_packet_t));
         if (send_err != ESP_OK) {
+#if ENABLE_DEBUG_LOGS
             Serial.printf("Failed to send pairing beacon: %s\n", esp_err_to_name(send_err));
+#endif
         }
     }
 
