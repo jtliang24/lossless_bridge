@@ -10,6 +10,16 @@
 **/.clang_complete
 **/.gcc-flags.json
 
+# --- ESP-IDF Build & Configuration ---
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.temp
+**/sdkconfig.*
+!**/sdkconfig.defaults
+!**/sdkconfig.defaults.*
+**/managed_components/
+**/dependencies.lock
+
 # --- VS Code Configuration ---
 # VS Code C/C++ Intellisense and debugging files are dynamically regenerated
 # by PlatformIO and are machine-specific.
