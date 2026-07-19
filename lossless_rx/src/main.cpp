@@ -312,6 +312,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
 // Initialize standard I2S Master
 static esp_err_t init_i2s(void) {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.dma_desc_num = 8; // 8 descriptors * 5ms = 40ms DMA buffering capacity
     esp_err_t ret = i2s_new_channel(&chan_cfg, &tx_chan, NULL);
     if (ret != ESP_OK) return ret;
 
