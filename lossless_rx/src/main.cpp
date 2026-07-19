@@ -343,7 +343,9 @@ static esp_err_t init_i2s(void) {
 // Dedicated FreeRTOS I2S playback task pinned to Core 1
 void i2s_playback_task(void *pvParameters) {
     static uint8_t out_buf[FRAME_SIZE];
+    static uint8_t conceal_buf[FRAME_SIZE];
     static uint8_t silence_buf[FRAME_SIZE] = {0};
+    static bool has_last_good = false;
     bool prebuffering = true;
     
     // Playback starts when prebuffer threshold (30ms / 3 frames) is met
@@ -357,9 +359,18 @@ void i2s_playback_task(void *pvParameters) {
                 Serial.println("Buffering complete. Playback started.");
 #endif
             } else {
-                // Write silence to prevent clock issues
+                // Conceal during initial prebuffering / re-buffering
                 size_t written = 0;
-                i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                if (has_last_good) {
+                    // Attenuate last good frame by 50% to softly fade
+                    int16_t *samples = (int16_t *)conceal_buf;
+                    for (size_t i = 0; i < FRAME_SIZE / 2; i++) {
+                        samples[i] >>= 1;
+                    }
+                    i2s_channel_write(tx_chan, conceal_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                } else {
+                    i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                }
                 vTaskDelay(pdMS_TO_TICKS(10)); // Wait for next UAC tick
             }
         } else {
@@ -371,10 +382,20 @@ void i2s_playback_task(void *pvParameters) {
 #endif
                 stats_underflows++;
                 size_t written = 0;
-                i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                if (has_last_good) {
+                    int16_t *samples = (int16_t *)conceal_buf;
+                    for (size_t i = 0; i < FRAME_SIZE / 2; i++) {
+                        samples[i] >>= 1;
+                    }
+                    i2s_channel_write(tx_chan, conceal_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                } else {
+                    i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                }
                 vTaskDelay(pdMS_TO_TICKS(10));
             } else {
                 size_t bytes_read = ring_buffer.read(out_buf, FRAME_SIZE);
+                memcpy(conceal_buf, out_buf, FRAME_SIZE);
+                has_last_good = true;
                 size_t written = 0;
                 i2s_channel_write(tx_chan, out_buf, FRAME_SIZE, &written, portMAX_DELAY);
             }
