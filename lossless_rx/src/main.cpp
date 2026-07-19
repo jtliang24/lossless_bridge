@@ -497,6 +497,25 @@ void loop() {
     static uint32_t last_stats_time = 0;
     uint32_t now = millis();
 
+    // Flush incomplete frame if no sub-packet has arrived for > 15ms
+    if (active_seq != 0xFFFFFFFF && received_mask > 0 && received_mask < 0xFF) {
+        if (now - last_packet_time > 15) {
+            try_fec_recovery();
+            if (received_mask < 0xFF) {
+                for (int i = 0; i < SUB_PACKETS_PER_FRAME; i++) {
+                    if (!(received_mask & (1 << i))) {
+                        memset(staging_buffer + (i * AUDIO_PAYLOAD_SIZE), 0, AUDIO_PAYLOAD_SIZE);
+                    }
+                }
+            }
+            ring_buffer.write(staging_buffer, FRAME_SIZE);
+            stats_frames_received++;
+            active_seq = 0xFFFFFFFF;
+            received_mask = 0;
+            parity_received = false;
+        }
+    }
+
     // 1. Send broadcast pairing beacon every 1 second
     if (now - last_beacon_time >= 1000) {
         last_beacon_time = now;
