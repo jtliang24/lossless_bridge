@@ -372,7 +372,7 @@ void i2s_playback_task(void *pvParameters) {
                 } else {
                     i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
                 }
-                vTaskDelay(pdMS_TO_TICKS(10)); // Wait for next UAC tick
+                vTaskDelay(pdMS_TO_TICKS(2)); // Poll buffer status frequently during rebuffering
             }
         } else {
             if (ring_buffer.available() < FRAME_SIZE) {
@@ -392,7 +392,7 @@ void i2s_playback_task(void *pvParameters) {
                 } else {
                     i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
                 }
-                vTaskDelay(pdMS_TO_TICKS(10));
+                vTaskDelay(pdMS_TO_TICKS(2));
             } else {
                 size_t bytes_read = ring_buffer.read(out_buf, FRAME_SIZE);
                 memcpy(conceal_buf, out_buf, FRAME_SIZE);
