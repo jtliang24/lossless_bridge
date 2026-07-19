@@ -142,7 +142,7 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
                 esp_now_peer_info_t peer;
                 memset(&peer, 0, sizeof(peer));
                 memcpy(peer.peer_addr, receiver_mac, 6);
-                peer.channel = 1;
+                peer.channel = 11;
                 peer.ifidx = WIFI_IF_STA;
                 peer.encrypt = false;
                 
@@ -285,7 +285,7 @@ void app_main() {
     
     // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE));
     ESP_ERROR_CHECK(esp_wifi_set_promiscuous(false));
     
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // Disable power saving for low latency
@@ -306,7 +306,7 @@ void app_main() {
     esp_now_peer_info_t broadcast_peer;
     memset(&broadcast_peer, 0, sizeof(broadcast_peer));
     memcpy(broadcast_peer.peer_addr, broadcast_mac, 6);
-    broadcast_peer.channel = 1;
+    broadcast_peer.channel = 11;
     broadcast_peer.ifidx = WIFI_IF_STA;
     broadcast_peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&broadcast_peer));
