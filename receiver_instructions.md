@@ -9,12 +9,12 @@ This guide outlines how to code and compile the **Receiver** (`lossless_rx`) pro
 Ensure your `lossless_rx/platformio.ini` is configured as follows (already set up in the workspace):
 ```ini
 [env:seeed_xiao_esp32s3]
-platform = espressif32
+platform = https://github.com/pioarduino/platform-espressif32/releases/download/stable/platform-espressif32.zip
 board = seeed_xiao_esp32s3
 framework = arduino
 
 build_flags =
-    -DBOARD_HAS_PSRAM
+    -DARDUINO_USB_CDC_ON_BOOT=1
 
 board_build.partitions = huge_app.csv
 ```
@@ -25,9 +25,13 @@ board_build.partitions = huge_app.csv
 
 Implement the receiver application in `lossless_rx/src/main.cpp`. This includes:
 - A custom, thread-safe, non-allocating circular ring buffer.
-- ESP-NOW receive handler to staging-assemble the 8 sub-packets (1920 bytes total) per frame.
-- An independent high-priority FreeRTOS playback task assigned to **Core 1** to stream data directly into the I2S PCM5102 DAC.
+- An ESP-NOW receive handler to staging-assemble the 8 sub-packets (1920 bytes total) per 10ms frame.
+- Pairing confirmation and peer auto-registration: processes `TX_CONF` packets from the transmitter to register the transmitter as a peer and configure the range-optimized PHY rate (802.11g 24 Mbps).
+- Connection monitoring: resets the pairing status if the stream goes inactive for more than 5 seconds.
+- An independent high-priority FreeRTOS playback task assigned to **Core 1** to stream data directly into the I2S PCM5102 DAC (enforcing a 16-bit slot width).
+- A periodic diagnostic logging system that prints channel, frame rate, sub-packet rate, buffer occupancy (in ms), and underflows to the Serial monitor.
 - A background pairing beacon task that periodically broadcasts the receiver's MAC address to pair with the transmitter.
+- LED status indication: active-low LED is ON when audio stream is active, and flashes briefly during beacon transmission when idle.
 
 ```cpp
 #include <Arduino.h>
@@ -36,6 +40,8 @@ Implement the receiver application in `lossless_rx/src/main.cpp`. This includes:
 #include <esp_wifi.h>
 #include <esp_arduino_version.h>
 #include "driver/i2s_std.h"
+#include "esp_mac.h"
+#define ENABLE_DEBUG_LOGS 0 // Set to 1 to enable verbose debugging
 
 #define STATUS_LED_PIN GPIO_NUM_21 // active-low LED on Seeed Studio XIAO ESP32S3
 
@@ -61,6 +67,13 @@ typedef struct __attribute__((packed)) {
     uint8_t mac[6];            // Receiver's MAC address
 } beacon_packet_t;
 
+typedef struct __attribute__((packed)) {
+    char magic[8];             // "TX_CONF"
+    uint8_t transmitter_mac[6]; // Transmitter's MAC address
+    uint8_t receiver_mac[6];    // Receiver's MAC address in transmitter memory
+    uint32_t seq_num;           // Sequence number
+} tx_confirm_packet_t;
+
 // --- Thread-Safe Ring Buffer Implementation ---
 class AudioRingBuffer {
 private:
@@ -69,13 +82,12 @@ private:
     size_t head;
     size_t tail;
     size_t size;
-    portMUX_TYPE mux;
+    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 public:
     AudioRingBuffer(size_t cap) : capacity(cap), head(0), tail(0), size(0) {
         buffer = new uint8_t[capacity];
         memset(buffer, 0, capacity);
-        vPortCPUInitializeMutex(&mux);
     }
     
     ~AudioRingBuffer() {
@@ -136,6 +148,13 @@ public:
 // Allocate a 19200 byte ring buffer (10 frames / 100ms of stereo 48kHz 16-bit)
 AudioRingBuffer ring_buffer(19200);
 
+// Statistics and connection tracking
+static uint32_t stats_frames_received = 0;
+static uint32_t stats_sub_packets_received = 0;
+static uint32_t stats_underflows = 0;
+static uint8_t sender_mac[6] = {0};
+static bool sender_known = false;
+
 // ESP-NOW Frame Assembly Staging
 static uint8_t staging_buffer[FRAME_SIZE];
 static uint32_t active_seq = 0xFFFFFFFF;
@@ -147,14 +166,97 @@ static i2s_chan_handle_t tx_chan = NULL;
 // ESP-NOW receive callback
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void OnDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *incomingBytes, int len) {
+    const uint8_t* mac = recv_info->src_addr;
 #else
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
 #endif
     last_packet_time = millis();
 
+#if ENABLE_DEBUG_LOGS
+    static uint32_t last_raw_recv_time = 0;
+    if (millis() - last_raw_recv_time >= 1000) {
+        last_raw_recv_time = millis();
+        Serial.printf("Raw ESP-NOW recv: len=%d from %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      len, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+#endif
+
+    if (len == sizeof(tx_confirm_packet_t)) {
+        const tx_confirm_packet_t* conf = (const tx_confirm_packet_t*)incomingBytes;
+#if ENABLE_DEBUG_LOGS
+        Serial.printf("DEBUG: Received 24-byte packet. Magic: '%.8s' | Hex: %02X %02X %02X %02X %02X %02X %02X %02X | Seq: %lu\n",
+                      conf->magic, 
+                      conf->magic[0], conf->magic[1], conf->magic[2], conf->magic[3],
+                      conf->magic[4], conf->magic[5], conf->magic[6], conf->magic[7],
+                      (unsigned long)conf->seq_num);
+        Serial.printf("DEBUG: Transmitter MAC: %02X:%02X:%02X:%02X:%02X:%02X | Receiver MAC in payload: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      conf->transmitter_mac[0], conf->transmitter_mac[1], conf->transmitter_mac[2],
+                      conf->transmitter_mac[3], conf->transmitter_mac[4], conf->transmitter_mac[5],
+                      conf->receiver_mac[0], conf->receiver_mac[1], conf->receiver_mac[2],
+                      conf->receiver_mac[3], conf->receiver_mac[4], conf->receiver_mac[5]);
+#endif
+        
+        bool is_magic_match = (conf->magic[0] == 'T' && conf->magic[1] == 'X' && conf->magic[2] == '_' && 
+                               conf->magic[3] == 'C' && conf->magic[4] == 'O' && conf->magic[5] == 'N' && 
+                               conf->magic[6] == 'F') ||
+                              (conf->magic[0] == 'T' && conf->magic[1] == 'E' && conf->magic[2] == 'S' && 
+                               conf->magic[3] == 'T' && conf->magic[4] == '_' && conf->magic[5] == 'U' && 
+                               conf->magic[6] == 'N' && conf->magic[7] == 'I');
+                               
+#if ENABLE_DEBUG_LOGS
+        Serial.printf("DEBUG: is_magic_match: %d | sender_known: %d\n", is_magic_match, sender_known);
+#endif
+        if (is_magic_match) {
+            if (!sender_known || memcmp(sender_mac, conf->transmitter_mac, 6) != 0) {
+                esp_now_peer_info_t peer;
+                memset(&peer, 0, sizeof(peer));
+                memcpy(peer.peer_addr, conf->transmitter_mac, 6);
+                peer.channel = 1;
+                peer.ifidx = WIFI_IF_STA;
+                peer.encrypt = false;
+                
+                if (esp_now_is_peer_exist(conf->transmitter_mac)) {
+                    esp_now_del_peer(conf->transmitter_mac);
+                }
+                
+                esp_err_t err = esp_now_add_peer(&peer);
+                if (err == ESP_OK) {
+                    // Set PHY rate for audio throughput with good range
+                    // 802.11g 24 Mbps (OFDM): reduced airtime, ~2400 unicast pkts/s capacity
+                    esp_now_rate_config_t rate_cfg = {
+                        .phymode = WIFI_PHY_MODE_11G,
+                        .rate = WIFI_PHY_RATE_24M,
+                        .ersu = false,
+                        .dcm = false,
+                    };
+                    esp_now_set_peer_rate_config(conf->transmitter_mac, &rate_cfg);
+
+                    memcpy(sender_mac, conf->transmitter_mac, 6);
+                    sender_known = true;
+#if ENABLE_DEBUG_LOGS
+                    Serial.printf("Successfully registered Transmitter peer: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                                  sender_mac[0], sender_mac[1], sender_mac[2],
+                                  sender_mac[3], sender_mac[4], sender_mac[5]);
+#endif
+                } else {
+                    Serial.printf("Failed to register Transmitter peer: %s\n", esp_err_to_name(err));
+                }
+            }
+        }
+    }
+
     if (len == sizeof(audio_packet_t)) {
+        stats_sub_packets_received++;
         const audio_packet_t* pkt = (const audio_packet_t*)incomingBytes;
         
+        // Monitor transmitter pairing / MAC address updates
+        if (!sender_known || memcmp(sender_mac, mac, 6) != 0) {
+            memcpy(sender_mac, mac, 6);
+            sender_known = true;
+            Serial.printf("Pairing complete. Receiving audio from Transmitter MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        }
+
         // 1. Check if new sequence frame
         if (pkt->seq_num > active_seq || active_seq == 0xFFFFFFFF) {
             active_seq = pkt->seq_num;
@@ -171,6 +273,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                 // 3. If all 8 pieces received, push to playback ring buffer
                 if (received_mask == 0xFF) {
                     ring_buffer.write(staging_buffer, FRAME_SIZE);
+                    stats_frames_received++;
                     active_seq = 0xFFFFFFFF; // Reset for next frame
                     received_mask = 0;
                 }
@@ -223,7 +326,9 @@ void i2s_playback_task(void *pvParameters) {
         if (prebuffering) {
             if (ring_buffer.available() >= prebuffer_bytes) {
                 prebuffering = false;
+#if ENABLE_DEBUG_LOGS
                 Serial.println("Buffering complete. Playback started.");
+#endif
             } else {
                 // Write silence to prevent clock issues
                 size_t written = 0;
@@ -236,7 +341,10 @@ void i2s_playback_task(void *pvParameters) {
                 // Buffer underflow
                 prebuffering = true;
                 ring_buffer.clear();
+#if ENABLE_DEBUG_LOGS
                 Serial.println("Buffer underflow. Buffering...");
+#endif
+                stats_underflows++;
                 size_t written = 0;
                 i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
                 vTaskDelay(pdMS_TO_TICKS(10));
@@ -250,7 +358,13 @@ void i2s_playback_task(void *pvParameters) {
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    
+    // Wait up to 3 seconds for Serial Monitor to connect (needed for native USB CDC)
+    uint32_t start_time = millis();
+    while (!Serial && (millis() - start_time < 3000)) {
+        delay(10);
+    }
+    
     Serial.println("RECEIVER: Initializing Lossless Receiver...");
 
     // Status LED initialization (active-low)
@@ -264,10 +378,28 @@ void setup() {
     }
     Serial.println("I2S initialized successfully.");
 
-    // Start Wi-Fi in Station Mode on Channel 1
+    // Start Wi-Fi in STA Mode
     WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false, true); // Clear saved credentials
+    WiFi.persistent(false); // Disable persistent settings in NVS
+    
+    // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
+    esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
     esp_wifi_set_ps(WIFI_PS_NONE); // Disable Wi-Fi sleep for low latency
+    esp_wifi_set_max_tx_power(84); // 21 dBm max TX power for range
+
+    uint8_t rx_mac[6];
+    esp_read_mac(rx_mac, ESP_MAC_WIFI_STA); // Use STA MAC address for ESP-NOW
+    Serial.printf("Receiver MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                  rx_mac[0], rx_mac[1], rx_mac[2], rx_mac[3], rx_mac[4], rx_mac[5]);
+    
+    uint8_t primary_chan = 0;
+    wifi_second_chan_t second_chan;
+    esp_wifi_get_channel(&primary_chan, &second_chan);
+    Serial.printf("Receiver Wi-Fi Channel initialized to: %d\n", primary_chan);
 
     // Initialize ESP-NOW
     if (esp_now_init() != ESP_OK) {
@@ -275,11 +407,17 @@ void setup() {
         return;
     }
 
+    esp_err_t cb_err;
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
-    esp_now_register_recv_cb(OnDataRecv);
+    cb_err = esp_now_register_recv_cb(OnDataRecv);
 #else
-    esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
+    cb_err = esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
 #endif
+    if (cb_err != ESP_OK) {
+        Serial.printf("Error registering ESP-NOW receive callback: %s\n", esp_err_to_name(cb_err));
+    } else {
+        Serial.println("ESP-NOW receive callback registered successfully.");
+    }
 
     // Add Broadcast Peer for pairing beacons
     uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -287,6 +425,7 @@ void setup() {
     memset(&peerInfo, 0, sizeof(peerInfo));
     memcpy(peerInfo.peer_addr, broadcast_mac, 6);
     peerInfo.channel = 1;
+    peerInfo.ifidx = WIFI_IF_STA;
     peerInfo.encrypt = false;
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
         Serial.println("Failed to add broadcast peer!");
@@ -308,27 +447,78 @@ void setup() {
 
 void loop() {
     static uint32_t last_beacon_time = 0;
+    static uint32_t last_stats_time = 0;
     uint32_t now = millis();
 
     // 1. Send broadcast pairing beacon every 1 second
     if (now - last_beacon_time >= 1000) {
         last_beacon_time = now;
         
+        // Blink LED briefly to show beacon transmission (only if not streaming)
+        bool is_streaming = (now - last_packet_time < 200);
+        if (!is_streaming) {
+            digitalWrite(STATUS_LED_PIN, LOW); // LED ON
+            delay(50);
+            digitalWrite(STATUS_LED_PIN, HIGH); // LED OFF
+        }
+        
         beacon_packet_t beacon;
         memcpy(beacon.magic, "LR_BEACN", 8);
         esp_read_mac(beacon.mac, ESP_MAC_WIFI_STA);
         
         uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-        esp_now_send(broadcast_mac, (uint8_t*)&beacon, sizeof(beacon_packet_t));
+        esp_err_t send_err = esp_now_send(broadcast_mac, (uint8_t*)&beacon, sizeof(beacon_packet_t));
+        if (send_err != ESP_OK) {
+#if ENABLE_DEBUG_LOGS
+            Serial.printf("Failed to send pairing beacon: %s\n", esp_err_to_name(send_err));
+#endif
+        }
     }
 
-    // 2. Control status LED: ON when audio stream is active (packets received in last 200ms)
-    if (now - last_packet_time < 200) {
+    // 2. Control status LED & connection timeout
+    bool is_streaming = (now - last_packet_time < 200);
+    if (is_streaming) {
         digitalWrite(STATUS_LED_PIN, LOW); // LED ON
     } else {
         digitalWrite(STATUS_LED_PIN, HIGH); // LED OFF
+        // Reset sender status if stream went dead for more than 5 seconds
+        if (sender_known && (now - last_packet_time > 5000)) {
+            sender_known = false;
+            memset(sender_mac, 0, 6);
+            Serial.println("Transmitter connection lost (timeout).");
+        }
+    }
+
+    // 3. Periodically print stats every 1 second
+    if (now - last_stats_time >= 1000) {
+        uint32_t elapsed = now - last_stats_time;
+        last_stats_time = now;
+
+        uint8_t primary_chan = 0;
+        wifi_second_chan_t second_chan;
+        esp_wifi_get_channel(&primary_chan, &second_chan);
+
+        if (is_streaming) {
+            uint32_t frames = stats_frames_received;
+            uint32_t packets = stats_sub_packets_received;
+            uint32_t underflows = stats_underflows;
+
+            // Reset stats counters
+            stats_frames_received = 0;
+            stats_sub_packets_received = 0;
+            stats_underflows = 0;
+
+            size_t buffered_bytes = ring_buffer.available();
+            float buffer_ms = (float)buffered_bytes / 192.0f; // 48000 Hz * 2 channels * 2 bytes/sample = 192 bytes/ms
+
+            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (Expected: ~100) | Sub-packets: %lu/s (Expected: ~800) | Buffer: %zu bytes (%.1f ms) | Underflows: %lu/s\n",
+                          primary_chan, frames, packets, buffered_bytes, buffer_ms, underflows);
+        } else {
+            Serial.printf("[IDLE] Waiting for Transmitter... Current Wi-Fi Chan: %d\n", primary_chan);
+        }
     }
 
     delay(20);
 }
+```
 ```
