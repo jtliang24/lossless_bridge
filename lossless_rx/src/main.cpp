@@ -38,6 +38,15 @@ typedef struct __attribute__((packed)) {
     uint32_t seq_num;           // Sequence number
 } tx_confirm_packet_t;
 
+// Statistics and connection tracking
+static uint32_t stats_frames_received = 0;
+static uint32_t stats_sub_packets_received = 0;
+static uint32_t stats_underflows = 0;
+static uint32_t stats_buffer_overflows = 0;
+static uint32_t stats_silence_frames = 0;
+static uint8_t sender_mac[6] = {0};
+static bool sender_known = false;
+
 // --- Thread-Safe Ring Buffer Implementation ---
 class AudioRingBuffer {
 private:
@@ -65,6 +74,7 @@ public:
             size_t overflow = (size + len) - capacity;
             head = (head + overflow) % capacity;
             size -= overflow;
+            stats_buffer_overflows++;
         }
         size_t first_part = min(len, capacity - tail);
         memcpy(buffer + tail, data, first_part);
@@ -111,13 +121,6 @@ public:
 
 // Allocate a 38400 byte ring buffer (20 frames / 200ms of stereo 48kHz 16-bit)
 AudioRingBuffer ring_buffer(38400);
-
-// Statistics and connection tracking
-static uint32_t stats_frames_received = 0;
-static uint32_t stats_sub_packets_received = 0;
-static uint32_t stats_underflows = 0;
-static uint8_t sender_mac[6] = {0};
-static bool sender_known = false;
 
 // ESP-NOW Frame Assembly Staging
 static uint8_t staging_buffer[FRAME_SIZE];
@@ -269,6 +272,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                     for (uint32_t s = 0; s < skipped; s++) {
                         ring_buffer.write(silence_frame, FRAME_SIZE);
                         stats_frames_received++;
+                        stats_silence_frames++;
                     }
                 }
             }
@@ -569,17 +573,24 @@ void loop() {
             uint32_t frames = stats_frames_received;
             uint32_t packets = stats_sub_packets_received;
             uint32_t underflows = stats_underflows;
+            uint32_t overflows = stats_buffer_overflows;
+            uint32_t fec_rec = stats_fec_recoveries;
+            uint32_t silence = stats_silence_frames;
+            uint32_t real_frames = (frames > fec_rec + silence) ? (frames - fec_rec - silence) : 0;
 
             // Reset stats counters
             stats_frames_received = 0;
             stats_sub_packets_received = 0;
             stats_underflows = 0;
+            stats_buffer_overflows = 0;
+            stats_fec_recoveries = 0;
+            stats_silence_frames = 0;
 
             size_t buffered_bytes = ring_buffer.available();
             float buffer_ms = (float)buffered_bytes / 192.0f; // 48000 Hz * 2 channels * 2 bytes/sample = 192 bytes/ms
 
-            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (Expected: ~100) | Sub-packets: %lu/s (Expected: ~800) | Buffer: %zu bytes (%.1f ms) | Underflows: %lu/s\n",
-                          primary_chan, frames, packets, buffered_bytes, buffer_ms, underflows);
+            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Underflows: %lu/s | Overflows: %lu/s\n",
+                          primary_chan, frames, real_frames, fec_rec, silence, packets, buffered_bytes, buffer_ms, underflows, overflows);
         } else {
             Serial.printf("[IDLE] Waiting for Transmitter... Current Wi-Fi Chan: %d\n", primary_chan);
         }
