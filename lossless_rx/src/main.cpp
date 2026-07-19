@@ -186,10 +186,10 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                 esp_err_t err = esp_now_add_peer(&peer);
                 if (err == ESP_OK) {
                     // Set PHY rate for audio throughput with good range
-                    // 802.11b 11 Mbps (CCK): better range than OFDM, ~1200 unicast pkts/s capacity
+                    // 802.11g 24 Mbps (OFDM): reduced airtime, ~2400 unicast pkts/s capacity
                     esp_now_rate_config_t rate_cfg = {
-                        .phymode = WIFI_PHY_MODE_11B,
-                        .rate = WIFI_PHY_RATE_11M_L,
+                        .phymode = WIFI_PHY_MODE_11G,
+                        .rate = WIFI_PHY_RATE_24M,
                         .ersu = false,
                         .dcm = false,
                     };
@@ -342,11 +342,16 @@ void setup() {
     }
     Serial.println("I2S initialized successfully.");
 
-    // Start Wi-Fi in APSTA Mode on Channel 1 to lock the radio frequency and fully start both interfaces
-    WiFi.mode(WIFI_AP_STA);
+    // Start Wi-Fi in STA Mode
+    WiFi.mode(WIFI_STA);
     WiFi.disconnect(false, true); // Clear saved credentials
     WiFi.persistent(false); // Disable persistent settings in NVS
-    WiFi.softAP("Lossless_RX", NULL, 1); // Channel 1, no password (locks radio to Channel 1)
+    
+    // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_promiscuous(false);
+
     esp_wifi_set_ps(WIFI_PS_NONE); // Disable Wi-Fi sleep for low latency
     esp_wifi_set_max_tx_power(84); // 21 dBm max TX power for range
 
