@@ -202,7 +202,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                 esp_now_peer_info_t peer;
                 memset(&peer, 0, sizeof(peer));
                 memcpy(peer.peer_addr, conf->transmitter_mac, 6);
-                peer.channel = 11;
+                peer.channel = 8;
                 peer.ifidx = WIFI_IF_STA;
                 peer.encrypt = false;
                 
@@ -435,9 +435,9 @@ void setup() {
     WiFi.disconnect(false, true); // Clear saved credentials
     WiFi.persistent(false); // Disable persistent settings in NVS
     
-    // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
+    // Lock the radio to Channel 8 using the promiscuous mode workaround in STA mode
     esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(8, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
 
     esp_wifi_set_ps(WIFI_PS_NONE); // Disable Wi-Fi sleep for low latency
@@ -476,7 +476,7 @@ void setup() {
     esp_now_peer_info_t peerInfo;
     memset(&peerInfo, 0, sizeof(peerInfo));
     memcpy(peerInfo.peer_addr, broadcast_mac, 6);
-    peerInfo.channel = 11;
+    peerInfo.channel = 8;
     peerInfo.ifidx = WIFI_IF_STA;
     peerInfo.encrypt = false;
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
