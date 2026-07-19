@@ -109,8 +109,8 @@ public:
     }
 };
 
-// Allocate a 19200 byte ring buffer (10 frames / 100ms of stereo 48kHz 16-bit)
-AudioRingBuffer ring_buffer(19200);
+// Allocate a 38400 byte ring buffer (20 frames / 200ms of stereo 48kHz 16-bit)
+AudioRingBuffer ring_buffer(38400);
 
 // Statistics and connection tracking
 static uint32_t stats_frames_received = 0;
