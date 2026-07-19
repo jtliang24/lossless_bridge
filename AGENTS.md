@@ -22,8 +22,8 @@ The repository implements a low-latency, high-fidelity wireless audio link (48kH
 ```
 
 ### Components:
-*   **[`lossless_tx/`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx)**: Transmitter firmware. Built using the **ESP-IDF framework** with PlatformIO. It enumerates as a USB Audio Class (UAC) 1.0 device on a Seeed Studio XIAO ESP32S3, receives stereo PCM streams from the PC, and streams them packetized over ESP-NOW.
-*   **[`lossless_rx/`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_rx)**: Receiver firmware. Built using the **Arduino framework** with PlatformIO. It receives ESP-NOW packets, reconstructs 10ms audio frames in a ring buffer, and outputs I2S audio via DMA to a PCM5102 DAC.
+*   **[`lossless_tx/`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx)**: Transmitter firmware. Built using the **ESP-IDF framework** with PlatformIO. It enumerates as a USB Audio Class (UAC) 1.0 device on a Seeed Studio XIAO ESP32S3, receives stereo PCM streams from the PC, and streams them packetized over ESP-NOW with XOR FEC parity.
+*   **[`lossless_rx/`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_rx)**: Receiver firmware. Built using the **Arduino framework** with PlatformIO. It receives ESP-NOW packets, reconstructs 10ms audio frames (recovering single missing packets via FEC parity), buffers them in a 200ms ring buffer, and outputs I2S audio via DMA to a PCM5102 DAC.
 *   **[`usb_dac_espidf/`](file:///C:/Users/qingc/Projects/lossless_audio/usb_dac_espidf)**: Reference prototype. Demonstrates a single-board USB DAC using ESP-IDF, playing UAC audio directly through local I2S.
 *   **[`usb_audio_dac/`](file:///C:/Users/qingc/Projects/lossless_audio/usb_audio_dac)**: Reference prototype. Demonstrates a single-board USB DAC using Arduino and the `AudioTools` library.
 
@@ -35,7 +35,9 @@ The repository implements a low-latency, high-fidelity wireless audio link (48kH
 *   **Audio Format**: 48,000 Hz, 16-bit, Stereo (2 channels).
 *   **Throughput**: $48,000 \times 2\text{ bytes} \times 2\text{ channels} = 192,000\text{ bytes/second}$ ($192\text{ bytes/ms}$).
 *   **10ms Frame**: Represents 480 stereo samples. Total size = $1920\text{ bytes}$.
-*   **ESP-NOW Packets**: Divided into **8 sub-packets** per 10ms frame. Each sub-packet contains $240\text{ bytes}$ of audio payload to fit within the ESP-NOW limit of 250 bytes.
+*   **ESP-NOW Packets**: Divided into **9 sub-packets** per 10ms frame:
+    *   Sub-packets `0` to `7`: Audio payload ($240\text{ bytes}$ each).
+    *   Sub-packet `8`: XOR Parity sub-packet ($240\text{ bytes}$) for Forward Error Correction (FEC).
 
 ### Packet Structs
 Both components must use exact matching packed structs:
@@ -44,10 +46,10 @@ Both components must use exact matching packed structs:
 // Size: 248 bytes
 typedef struct __attribute__((packed)) {
     uint32_t seq_num;          // Incremented for every 10ms frame
-    uint8_t sub_packet_idx;    // 0 to 7
-    uint8_t total_sub_packets; // Always 8
+    uint8_t sub_packet_idx;    // 0 to 7 (Audio), 8 (FEC Parity)
+    uint8_t total_sub_packets; // Always 9
     uint16_t payload_len;      // Always 240
-    uint8_t audio_data[240];   // Stereo interleaved samples
+    uint8_t audio_data[240];   // Stereo interleaved samples or XOR parity
 } audio_packet_t;
 
 // Size: 14 bytes
@@ -92,14 +94,14 @@ sequenceDiagram
     Note over RX: Sets sender_known = true
     
     Note over TX: Host PC plays audio
-    loop Spaced at ~1.25ms intervals
-        TX->>RX: Unicast audio_packet_t (seq_num, sub_packet_idx 0..7)
-        Note over RX: Assembly in staging buffer
+    loop Spaced at ~1.1ms intervals
+        TX->>RX: Unicast audio_packet_t (seq_num, sub_packet_idx 0..7 audio + 8 FEC parity)
+        Note over RX: Assembly in staging buffer & XOR FEC recovery if 1 sub-packet missed
     end
     
-    Note over RX: 8/8 sub-packets received
-    Note over RX: Push 1920 bytes to Ring Buffer
-    Note over RX: Core 1 Playback Task reads from Ring Buffer -> I2S DMA -> DAC
+    Note over RX: 8/8 audio sub-packets received or FEC-recovered
+    Note over RX: Push 1920 bytes to 200ms Ring Buffer
+    Note over RX: Core 1 Playback Task reads from Ring Buffer -> I2S DMA (8 desc / 40ms) -> DAC
     Note over RX: LED remains solid ON (active stream)
     
     Note over TX: Every 1 Second (Active Check)
@@ -112,31 +114,35 @@ sequenceDiagram
 
 When editing code, do **NOT** undo these critical fixes:
 
-### 1. Wi-Fi Channel Lock Workaround (No-AP)
+### 1. Wi-Fi Channel Lock Workaround (No-AP, Channel 11)
 *   **The Issue**: ESP-NOW requires transmitter and receiver to be on the same radio channel. Setting this in station mode normally requires connecting to an AP, while running softAP mode consumes excessive radio airtime and causes packet dropouts.
-*   **The Workaround**: Initialize Wi-Fi in pure station mode (`WIFI_MODE_STA`), temporarily enable promiscuous mode, change the channel to 1, and then disable promiscuous mode. This forces the radio lock without launching an AP.
+*   **The Workaround**: Initialize Wi-Fi in pure station mode (`WIFI_MODE_STA`), temporarily enable promiscuous mode, change the channel to **Channel 11**, and then disable promiscuous mode. This forces the radio lock without launching an AP.
     *   **ESP-IDF Implementation** ([`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)):
         ```c
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
         ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-        ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
+        ESP_ERROR_CHECK(esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE));
         ESP_ERROR_CHECK(esp_wifi_set_promiscuous(false));
         ```
     *   **Arduino Implementation** ([`lossless_rx/src/main.cpp`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_rx/src/main.cpp)):
         ```cpp
         WiFi.mode(WIFI_STA);
         esp_wifi_set_promiscuous(true);
-        esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
         esp_wifi_set_promiscuous(false);
         ```
 
 ### 2. Sequential ESP-NOW Transmission Spacing
-*   **The Issue**: Bursting 8 sub-packets (1920 bytes) all at once every 10ms overflows the internal ESP-NOW transmit queues/buffers and results in massive packet loss.
-*   **The Workaround**: In the UAC output callback, write code to process audio in chunks of 240 bytes and transmit each sub-packet *immediately* as it accumulates. Because the PC host sends small packets of ~192 bytes every 1ms, this naturally spreads out transmissions to roughly one packet every 1.25ms, keeping the queue completely clear.
+*   **The Issue**: Bursting 9 sub-packets (2160 bytes) all at once every 10ms overflows the internal ESP-NOW transmit queues/buffers and results in massive packet loss.
+*   **The Workaround**: In the UAC output callback, write code to process audio in chunks of 240 bytes and transmit each sub-packet *immediately* as it accumulates, followed by the 9th parity sub-packet. Because the PC host sends small packets of ~192 bytes every 1ms, this naturally spreads out transmissions to roughly one packet every 1.1ms, keeping the queue completely clear.
 
-### 3. ESP-NOW PHY Rate Tuning (802.11g 24 Mbps)
-*   **The Issue**: Default ESP-NOW uses slow 802.11b rates (e.g. 1 Mbps CCK) or auto-fallback rates, which increases airtime per packet. At ~800 packets/second, long airtime causes congestion and collisions.
+### 3. Forward Error Correction (XOR Parity Sub-packet)
+*   **The Issue**: Single wireless packet dropouts cause audible pops and clicks if missing slots are zero-filled.
+*   **The Workaround**: Transmit a 9th sub-packet per frame containing the byte-wise XOR parity of all 8 audio sub-packets. If the receiver misses any single sub-packet out of 8, it reconstructs it instantly using the parity payload with zero round-trip latency.
+
+### 4. ESP-NOW PHY Rate Tuning (802.11g 24 Mbps)
+*   **The Issue**: Default ESP-NOW uses slow 802.11b rates (e.g. 1 Mbps CCK) or auto-fallback rates, which increases airtime per packet. At ~900 packets/second, long airtime causes congestion and collisions.
 *   **The Workaround**: Programmatically configure the registered peer rate to use **802.11g 24 Mbps (OFDM)**. This offers the best trade-off between short airtime and long-range reception:
     ```c
     esp_now_rate_config_t rate_cfg = {
@@ -148,20 +154,20 @@ When editing code, do **NOT** undo these critical fixes:
     esp_now_set_peer_rate_config(peer_mac, &rate_cfg);
     ```
 
-### 4. PCM5102 Right-Channel Silence Fix
+### 5. PCM5102 Right-Channel Silence Fix
 *   **The Issue**: The external PCM5102 I2S DAC drops the right channel (producing silence on the right speaker) if the I2S slot bit width is left default or configured to 32-bit for a 16-bit stream.
 *   **The Workaround**: Explicitly set the I2S slot bit width to 16-bit inside the receiver I2S configuration:
     ```cpp
     std_cfg.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT;
     ```
 
-### 5. USB Host Descriptor Caching Bypass (PID `0x8002`)
+### 6. USB Host Descriptor Caching Bypass (PID `0x8002`)
 *   **The Issue**: Windows and macOS cache USB descriptor tables. If the channel count, sample rate, or bit resolution are changed in firmware, the host OS ignores the changes and uses cached values, causing playback errors.
 *   **The Workaround**: Increment the USB Product ID (PID) to `0x8002` in [`usb_descriptors.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/usb_descriptors.c) whenever audio configurations are updated. This forces the host OS to recognize it as a brand-new device.
 
-### 6. ESP-IDF UAC ABI Layout Configuration
+### 7. ESP-IDF UAC ABI Layout Configuration & Core Pinning
 *   **The Issue**: The `usb_device_uac.h` header changes its struct layouts based on macros defined in `sdkconfig.h` (e.g. `CONFIG_USB_DEVICE_UAC_AS_PART`). If `sdkconfig.h` is not included at the top of code referencing UAC configuration, silent ABI layout mismatches will break callbacks.
-*   **The Workaround**: Always include `"sdkconfig.h"` before any other headers in transmitter files (e.g. [`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)).
+*   **The Workaround**: Always include `"sdkconfig.h"` before any other headers in transmitter files (e.g. [`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)). Pin TinyUSB and UAC tasks to Core 0 (`CONFIG_UAC_TINYUSB_TASK_CORE=0`, `CONFIG_UAC_SPK_TASK_CORE=0`) in `sdkconfig.defaults`.
 
 ---
 
@@ -190,14 +196,15 @@ When editing code, do **NOT** undo these critical fixes:
 | **Receiver** | Actively receiving audio stream | Solid ON |
 
 ### Diagnostic Console Prints (Receiver)
-The receiver prints link health statistics every 1 second over its serial interface:
+The receiver prints detailed link health statistics every 1 second over its serial interface:
 ```text
-[LINK STATUS] Chan: 1 | Frames: 100/s | Sub-packets: 800/s | Buffer: 5760 bytes (30.0 ms) | Underflows: 0/s
+[LINK STATUS] Chan: 11 | Frames: 100/s (100 real, 0 FEC, 0 silence) | Sub-pkts: 900/s (Exp: ~900) | Buffer: 5760 B (30.0 ms) | Underflows: 0/s | Overflows: 0/s
 ```
 *   **Expected Frames**: ~100/s (1 frame per 10ms).
-*   **Expected Sub-packets**: ~800/s (8 sub-packets per frame).
-*   **Normal Buffer Occupancy**: 1920 to 9600 bytes (10ms to 50ms).
-*   **Underflows**: Should ideally be 0. If underflows occur, the receiver will mute and buffer audio for 30ms before restarting playback.
+*   **Frame Breakdown**: `real` (fully received audio sub-packets), `FEC` (recovered via XOR parity), `silence` (unrecoverable missing frames).
+*   **Expected Sub-packets**: ~900/s (8 audio + 1 FEC sub-packet per frame).
+*   **Normal Buffer Occupancy**: 1920 to 19200 bytes (10ms to 100ms, max capacity 38400 bytes / 200ms).
+*   **Underflows / Overflows**: Should ideally be 0. If underflows occur, Packet Loss Concealment (PLC) softly attenuates the last good frame while rebuffering.
 
 ---
 
@@ -232,4 +239,4 @@ Run from the repository root:
 1.  **Audio has Right-channel silence?** Check if `slot_bit_width` is explicitly configured to 16-bit in the receiver setup.
 2.  **Transmitter is unrecognized by PC Host?** Verify the USB PID in `lossless_tx/src/usb_descriptors.c` is set to `0x8002` (or incremented if configurations changed).
 3.  **Audible crackles or packet drops?** Check if the transmitter is bursting packets. Verify that it uses the sequential transmission path spacing instead of bursting.
-4.  **No link established?** Check if both boards have locked onto Wi-Fi Channel 1 using the promiscuous mode workaround.
+4.  **No link established?** Check if both boards have locked onto Wi-Fi **Channel 11** using the promiscuous mode workaround.
