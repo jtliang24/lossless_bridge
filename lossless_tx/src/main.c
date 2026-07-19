@@ -153,10 +153,10 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
                 esp_err_t err = esp_now_add_peer(&peer);
                 if (err == ESP_OK) {
                     // Set PHY rate for audio throughput with good range
-                    // 802.11b 11 Mbps (CCK): better range than OFDM, ~1200 unicast pkts/s capacity
+                    // 802.11g 24 Mbps (OFDM): reduced airtime, ~2400 unicast pkts/s capacity
                     esp_now_rate_config_t rate_cfg = {
-                        .phymode = WIFI_PHY_MODE_11B,
-                        .rate = WIFI_PHY_RATE_11M_L,
+                        .phymode = WIFI_PHY_MODE_11G,
+                        .rate = WIFI_PHY_RATE_24M,
                         .ersu = false,
                         .dcm = false,
                     };
@@ -280,20 +280,14 @@ void app_main() {
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     
-    // Explicitly configure the SoftAP interface on Channel 1 to lock the radio frequency
-    wifi_config_t ap_config = {
-        .ap = {
-            .ssid = "Lossless_TX",
-            .ssid_len = strlen("Lossless_TX"),
-            .channel = 1,
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_OPEN
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    
+    // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
     ESP_ERROR_CHECK(esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(false));
+    
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // Disable power saving for low latency
     esp_wifi_set_max_tx_power(84); // 21 dBm max TX power for range
 
