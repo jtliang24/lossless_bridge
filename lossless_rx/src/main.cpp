@@ -123,9 +123,33 @@ static bool sender_known = false;
 static uint8_t staging_buffer[FRAME_SIZE];
 static uint32_t active_seq = 0xFFFFFFFF;
 static uint8_t received_mask = 0;
+static uint8_t parity_buffer[AUDIO_PAYLOAD_SIZE];
+static bool parity_received = false;
+static uint32_t stats_fec_recoveries = 0;
 
 static volatile uint32_t last_packet_time = 0;
 static i2s_chan_handle_t tx_chan = NULL;
+
+static bool try_fec_recovery() {
+    if (!parity_received) return false;
+    uint8_t missing = ~received_mask & 0xFF;
+    if (__builtin_popcount(missing) != 1) return false;
+
+    int missing_idx = __builtin_ctz(missing);
+    uint8_t *target = staging_buffer + (missing_idx * AUDIO_PAYLOAD_SIZE);
+    memcpy(target, parity_buffer, AUDIO_PAYLOAD_SIZE);
+    for (int i = 0; i < SUB_PACKETS_PER_FRAME; i++) {
+        if (i != missing_idx) {
+            const uint8_t *src = staging_buffer + (i * AUDIO_PAYLOAD_SIZE);
+            for (size_t b = 0; b < AUDIO_PAYLOAD_SIZE; b++) {
+                target[b] ^= src[b];
+            }
+        }
+    }
+    received_mask |= (1 << missing_idx);
+    stats_fec_recoveries++;
+    return true;
+}
 
 // ESP-NOW receive callback
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
@@ -226,9 +250,12 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
             if (active_seq != 0xFFFFFFFF) {
                 // Flush incomplete frame if we received a partial frame
                 if (received_mask > 0 && received_mask < 0xFF) {
-                    for (int i = 0; i < SUB_PACKETS_PER_FRAME; i++) {
-                        if (!(received_mask & (1 << i))) {
-                            memset(staging_buffer + (i * AUDIO_PAYLOAD_SIZE), 0, AUDIO_PAYLOAD_SIZE);
+                    try_fec_recovery();
+                    if (received_mask < 0xFF) {
+                        for (int i = 0; i < SUB_PACKETS_PER_FRAME; i++) {
+                            if (!(received_mask & (1 << i))) {
+                                memset(staging_buffer + (i * AUDIO_PAYLOAD_SIZE), 0, AUDIO_PAYLOAD_SIZE);
+                            }
                         }
                     }
                     ring_buffer.write(staging_buffer, FRAME_SIZE);
@@ -247,22 +274,36 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
             }
             active_seq = pkt->seq_num;
             received_mask = 0;
+            parity_received = false;
         }
         
         // 2. Put sub-packet in correct slot
         if (pkt->seq_num == active_seq) {
             uint8_t idx = pkt->sub_packet_idx;
-            if (idx < SUB_PACKETS_PER_FRAME && !(received_mask & (1 << idx))) {
+            if (idx == SUB_PACKETS_PER_FRAME) {
+                // FEC Parity Sub-packet (index 8)
+                memcpy(parity_buffer, pkt->audio_data, AUDIO_PAYLOAD_SIZE);
+                parity_received = true;
+                if (received_mask != 0xFF && __builtin_popcount(received_mask & 0xFF) == 7) {
+                    try_fec_recovery();
+                }
+            } else if (idx < SUB_PACKETS_PER_FRAME && !(received_mask & (1 << idx))) {
+                // Audio Sub-packet (indices 0..7)
                 memcpy(staging_buffer + (idx * AUDIO_PAYLOAD_SIZE), pkt->audio_data, AUDIO_PAYLOAD_SIZE);
                 received_mask |= (1 << idx);
                 
-                // 3. If all 8 pieces received, push to playback ring buffer
-                if (received_mask == 0xFF) {
-                    ring_buffer.write(staging_buffer, FRAME_SIZE);
-                    stats_frames_received++;
-                    active_seq = 0xFFFFFFFF; // Reset for next frame
-                    received_mask = 0;
+                if (received_mask != 0xFF && __builtin_popcount(received_mask & 0xFF) == 7) {
+                    try_fec_recovery();
                 }
+            }
+
+            // 3. If all 8 pieces received or recovered via FEC, push to playback ring buffer
+            if (received_mask == 0xFF) {
+                ring_buffer.write(staging_buffer, FRAME_SIZE);
+                stats_frames_received++;
+                active_seq = 0xFFFFFFFF; // Reset for next frame
+                received_mask = 0;
+                parity_received = false;
             }
         }
     }

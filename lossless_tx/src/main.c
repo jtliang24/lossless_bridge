@@ -191,6 +191,7 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
 // accumulated, spreading ESP-NOW sends to ~1 packet per 1.25ms instead of
 // bursting 8 packets every 10ms (which overflows ESP-NOW's internal queue).
 static uint8_t sub_pkt_buf[AUDIO_PAYLOAD_SIZE];
+static uint8_t parity_buf[AUDIO_PAYLOAD_SIZE];
 static size_t  sub_pkt_offset = 0;
 static uint32_t frame_seq = 0;
 static uint8_t  sub_pkt_idx = 0;
@@ -218,9 +219,18 @@ static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *cb_ctx) {
             static audio_packet_t pkt;
             pkt.seq_num = frame_seq;
             pkt.sub_packet_idx = sub_pkt_idx;
-            pkt.total_sub_packets = SUB_PACKETS_PER_FRAME;
+            pkt.total_sub_packets = SUB_PACKETS_PER_FRAME + 1; // 9 sub-packets (8 audio + 1 FEC)
             pkt.payload_len = AUDIO_PAYLOAD_SIZE;
             memcpy(pkt.audio_data, sub_pkt_buf, AUDIO_PAYLOAD_SIZE);
+
+            // Accumulate parity
+            if (sub_pkt_idx == 0) {
+                memcpy(parity_buf, sub_pkt_buf, AUDIO_PAYLOAD_SIZE);
+            } else {
+                for (size_t i = 0; i < AUDIO_PAYLOAD_SIZE; i++) {
+                    parity_buf[i] ^= sub_pkt_buf[i];
+                }
+            }
 
             esp_err_t err;
             int retries = 5;
@@ -239,7 +249,30 @@ static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *cb_ctx) {
 
             sub_pkt_offset = 0;
             sub_pkt_idx++;
+
+            // After sending 8 audio sub-packets, transmit 9th FEC parity sub-packet (index 8)
             if (sub_pkt_idx >= SUB_PACKETS_PER_FRAME) {
+                static audio_packet_t fec_pkt;
+                fec_pkt.seq_num = frame_seq;
+                fec_pkt.sub_packet_idx = SUB_PACKETS_PER_FRAME; // index 8
+                fec_pkt.total_sub_packets = SUB_PACKETS_PER_FRAME + 1;
+                fec_pkt.payload_len = AUDIO_PAYLOAD_SIZE;
+                memcpy(fec_pkt.audio_data, parity_buf, AUDIO_PAYLOAD_SIZE);
+
+                retries = 5;
+                do {
+                    err = esp_now_send(receiver_mac, (uint8_t *)&fec_pkt, sizeof(audio_packet_t));
+                    if (err == ESP_ERR_ESPNOW_NO_MEM) {
+                        esp_rom_delay_us(100);
+                    } else {
+                        break;
+                    }
+                } while (--retries > 0);
+
+                if (err != ESP_OK) {
+                    tx_fail_count++;
+                }
+
                 sub_pkt_idx = 0;
                 frame_seq++;
             }
