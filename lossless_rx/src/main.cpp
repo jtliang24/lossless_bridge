@@ -175,7 +175,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
                 esp_now_peer_info_t peer;
                 memset(&peer, 0, sizeof(peer));
                 memcpy(peer.peer_addr, conf->transmitter_mac, 6);
-                peer.channel = 1;
+                peer.channel = 11;
                 peer.ifidx = WIFI_IF_STA;
                 peer.encrypt = false;
                 
@@ -223,6 +223,28 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingBytes, int len) {
 
         // 1. Check if new sequence frame
         if (pkt->seq_num > active_seq || active_seq == 0xFFFFFFFF) {
+            if (active_seq != 0xFFFFFFFF) {
+                // Flush incomplete frame if we received a partial frame
+                if (received_mask > 0 && received_mask < 0xFF) {
+                    for (int i = 0; i < SUB_PACKETS_PER_FRAME; i++) {
+                        if (!(received_mask & (1 << i))) {
+                            memset(staging_buffer + (i * AUDIO_PAYLOAD_SIZE), 0, AUDIO_PAYLOAD_SIZE);
+                        }
+                    }
+                    ring_buffer.write(staging_buffer, FRAME_SIZE);
+                    stats_frames_received++;
+                }
+
+                // If sequence number skipped frames, fill with silence to keep the buffer level up
+                uint32_t skipped = pkt->seq_num - active_seq - 1;
+                if (skipped > 0 && skipped <= 10) { // Limit to 10 frames (100ms) to prevent overflow
+                    static uint8_t silence_frame[FRAME_SIZE] = {0};
+                    for (uint32_t s = 0; s < skipped; s++) {
+                        ring_buffer.write(silence_frame, FRAME_SIZE);
+                        stats_frames_received++;
+                    }
+                }
+            }
             active_seq = pkt->seq_num;
             received_mask = 0;
         }
@@ -300,11 +322,9 @@ void i2s_playback_task(void *pvParameters) {
                 vTaskDelay(pdMS_TO_TICKS(10)); // Wait for next UAC tick
             }
         } else {
-            size_t bytes_read = ring_buffer.read(out_buf, FRAME_SIZE);
-            if (bytes_read < FRAME_SIZE) {
-                // Buffer underflow
+            if (ring_buffer.available() < FRAME_SIZE) {
+                // Buffer underflow - trigger prebuffering but DO NOT clear the buffer
                 prebuffering = true;
-                ring_buffer.clear();
 #if ENABLE_DEBUG_LOGS
                 Serial.println("Buffer underflow. Buffering...");
 #endif
@@ -313,6 +333,7 @@ void i2s_playback_task(void *pvParameters) {
                 i2s_channel_write(tx_chan, silence_buf, FRAME_SIZE, &written, portMAX_DELAY);
                 vTaskDelay(pdMS_TO_TICKS(10));
             } else {
+                size_t bytes_read = ring_buffer.read(out_buf, FRAME_SIZE);
                 size_t written = 0;
                 i2s_channel_write(tx_chan, out_buf, FRAME_SIZE, &written, portMAX_DELAY);
             }
@@ -349,7 +370,7 @@ void setup() {
     
     // Lock the radio to Channel 1 using the promiscuous mode workaround in STA mode
     esp_wifi_set_promiscuous(true);
-    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
 
     esp_wifi_set_ps(WIFI_PS_NONE); // Disable Wi-Fi sleep for low latency
@@ -388,7 +409,7 @@ void setup() {
     esp_now_peer_info_t peerInfo;
     memset(&peerInfo, 0, sizeof(peerInfo));
     memcpy(peerInfo.peer_addr, broadcast_mac, 6);
-    peerInfo.channel = 1;
+    peerInfo.channel = 11;
     peerInfo.ifidx = WIFI_IF_STA;
     peerInfo.encrypt = false;
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
