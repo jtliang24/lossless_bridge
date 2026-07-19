@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "usb_device_uac.h"
+#include "esp_rom_sys.h"
 
 static const char *TAG = "tx_main";
 
@@ -221,7 +222,17 @@ static esp_err_t uac_device_output_cb(uint8_t *buf, size_t len, void *cb_ctx) {
             pkt.payload_len = AUDIO_PAYLOAD_SIZE;
             memcpy(pkt.audio_data, sub_pkt_buf, AUDIO_PAYLOAD_SIZE);
 
-            esp_err_t err = esp_now_send(receiver_mac, (uint8_t *)&pkt, sizeof(audio_packet_t));
+            esp_err_t err;
+            int retries = 5;
+            do {
+                err = esp_now_send(receiver_mac, (uint8_t *)&pkt, sizeof(audio_packet_t));
+                if (err == ESP_ERR_ESPNOW_NO_MEM) {
+                    esp_rom_delay_us(100);
+                } else {
+                    break;
+                }
+            } while (--retries > 0);
+
             if (err != ESP_OK) {
                 tx_fail_count++;
             }
