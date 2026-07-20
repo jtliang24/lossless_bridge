@@ -165,9 +165,12 @@ When editing code, do **NOT** undo these critical fixes:
 *   **The Issue**: Windows and macOS cache USB descriptor tables. If the channel count, sample rate, or bit resolution are changed in firmware, the host OS ignores the changes and uses cached values, causing playback errors.
 *   **The Workaround**: Increment the USB Product ID (PID) to `0x8002` in [`usb_descriptors.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/usb_descriptors.c) whenever audio configurations are updated. This forces the host OS to recognize it as a brand-new device.
 
-### 7. ESP-IDF UAC ABI Layout Configuration & Core Pinning
-*   **The Issue**: The `usb_device_uac.h` header changes its struct layouts based on macros defined in `sdkconfig.h` (e.g. `CONFIG_USB_DEVICE_UAC_AS_PART`). If `sdkconfig.h` is not included at the top of code referencing UAC configuration, silent ABI layout mismatches will break callbacks.
-*   **The Workaround**: Always include `"sdkconfig.h"` before any other headers in transmitter files (e.g. [`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)). Pin TinyUSB and UAC tasks to Core 0 (`CONFIG_UAC_TINYUSB_TASK_CORE=0`, `CONFIG_UAC_SPK_TASK_CORE=0`) in `sdkconfig.defaults`.
+### 8. High Quality (Bit-Exact) vs Low Latency Mode Flag & Hardware Switch Support
+*   **The Issue**: Resampling drift compensation locks buffer depth to ~35ms for gaming/movies, but can introduce micro-crackling during aggressive drops. Audiophiles desire pure, untouched 100% bit-exact 48kHz PCM audio playback.
+*   **The Solution**: Place drift compensation behind a runtime flag `config_low_latency_mode`.
+    *   **High Quality Mode (`ENABLE_DRIFT_COMPENSATION_DEFAULT = 0`)**: Pure 100% bit-exact 48kHz PCM playback. Zero sample drops, zero sample dups, zero crackles.
+    *   **Low Latency Mode (`ENABLE_DRIFT_COMPENSATION_DEFAULT = 1`)**: Zero-crossing drift compensation enabled, locking latency to ~35ms.
+    *   **Hardware Switch Pin (`MODE_SWITCH_PIN`)**: Assigning a GPIO pin (e.g. `GPIO_NUM_7`) with internal pull-up allows a physical toggle switch to dynamically switch between High Quality and Low Latency modes on the fly!
 
 ---
 
@@ -178,6 +181,7 @@ When editing code, do **NOT** undo these critical fixes:
     *   `GPIO 4` (D3 Pin) -> **I2S BCLK** (Bit Clock / BCK)
     *   `GPIO 5` (D4 Pin) -> **I2S WS** (Word Select / LRCK)
     *   `GPIO 6` (D5 Pin) -> **I2S DOUT** (Data Output / DIN)
+*   **Mode Switch Pin (Optional)**: `MODE_SWITCH_PIN` (Default `-1`, set to e.g. `GPIO 7` for physical toggle switch).
 *   **Power & Ground**: Connect 3.3V or 5V to the DAC power, and connect GND common.
 
 ---
@@ -198,12 +202,12 @@ When editing code, do **NOT** undo these critical fixes:
 ### Diagnostic Console Prints (Receiver)
 The receiver prints detailed link health statistics every 1 second over its serial interface:
 ```text
-[LINK STATUS] Chan: 11 | Frames: 100/s (100 real, 0 FEC, 0 silence) | Sub-pkts: 900/s (Exp: ~900) | Buffer: 5760 B (30.0 ms) | Underflows: 0/s | Overflows: 0/s
+[LINK STATUS] Mode: High-Quality | Chan: 8 | Frames: 100/s (100 real, 0 FEC, 0 silence) | Sub-pkts: 900/s (Exp: ~900) | Buffer: 5760 B (30.0 ms) | Drift: 0 drop/s, 0 dup/s | Underflows: 0/s | Overflows: 0/s
 ```
+*   **Active Mode**: `High-Quality` (pure bit-exact PCM) or `Low-Latency` (drift compensation enabled).
 *   **Expected Frames**: ~100/s (1 frame per 10ms).
 *   **Frame Breakdown**: `real` (fully received audio sub-packets), `FEC` (recovered via XOR parity), `silence` (unrecoverable missing frames).
 *   **Expected Sub-packets**: ~900/s (8 audio + 1 FEC sub-packet per frame).
-*   **Normal Buffer Occupancy**: 1920 to 19200 bytes (10ms to 100ms, max capacity 38400 bytes / 200ms).
 *   **Underflows / Overflows**: Should ideally be 0. If underflows occur, Packet Loss Concealment (PLC) softly attenuates the last good frame while rebuffering.
 
 ---

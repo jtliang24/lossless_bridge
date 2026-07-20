@@ -18,6 +18,15 @@
 #define SUB_PACKETS_PER_FRAME 8
 #define FRAME_SIZE            (AUDIO_PAYLOAD_SIZE * SUB_PACKETS_PER_FRAME) // 1920 bytes (480 stereo samples)
 
+// Mode configuration (High Quality vs Low Latency)
+// Default: 0 = High Quality (Pure Bit-Exact 48kHz PCM), 1 = Low Latency (Zero-Crossing Resampling)
+#define ENABLE_DRIFT_COMPENSATION_DEFAULT 0 
+static volatile bool config_low_latency_mode = (ENABLE_DRIFT_COMPENSATION_DEFAULT != 0);
+
+// Hardware Mode Switch Pin (Optional toggle switch: GND = High Quality, OPEN/HIGH = Low Latency)
+// Set to -1 to disable hardware pin reading and use static flag above
+#define MODE_SWITCH_PIN -1 // e.g. GPIO_NUM_7
+
 typedef struct __attribute__((packed)) {
     uint32_t seq_num;          // Incremented for every 10ms frame
     uint8_t sub_packet_idx;    // 0 to 7
@@ -419,12 +428,8 @@ void i2s_playback_task(void *pvParameters) {
                 size_t current_buffer = ring_buffer.available();
                 size_t written = 0;
 
-                // Multi-tier drift scaling (Target: ~35ms / 6720 B)
-                // > 90ms (17280 B): Drop 3 samples/frame (max 3 samples/frame = ~6.25 ms/s drain rate)
-                // > 70ms (13440 B): Drop 2 samples/frame (~4.16 ms/s drain rate)
-                // > 50ms ( 9600 B): Drop 1 sample/frame  (~2.08 ms/s drain rate)
-                // < 25ms ( 4800 B): Duplicate 1 sample/frame
-                if (current_buffer > 9600) {
+                // Multi-tier drift scaling (Target: ~35ms / 6720 B) - Only active when config_low_latency_mode is true
+                if (config_low_latency_mode && current_buffer > 9600) {
                     int drop_count = 1;
                     if (current_buffer > 17280) {
                         drop_count = 3; // Max 3 samples/frame
@@ -452,7 +457,7 @@ void i2s_playback_task(void *pvParameters) {
                         has_last_good = true;
                         i2s_channel_write(tx_chan, raw_pcm_buf, bytes_read, &written, portMAX_DELAY);
                     }
-                } else if (current_buffer < 4800 && current_buffer >= (FRAME_SIZE - 4)) {
+                } else if (config_low_latency_mode && current_buffer < 4800 && current_buffer >= (FRAME_SIZE - 4)) {
                     // Duplicate 1 sample (read 479 samples = 1916 bytes, output 480 samples = 1920 bytes)
                     size_t read_bytes = FRAME_SIZE - 4;
                     size_t bytes_read = ring_buffer.read(raw_pcm_buf, read_bytes);
@@ -670,7 +675,8 @@ void loop() {
             size_t buffered_bytes = ring_buffer.available();
             float buffer_ms = (float)buffered_bytes / 192.0f; // 48000 Hz * 2 channels * 2 bytes/sample = 192 bytes/ms
 
-            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Drift: %lu drop/s, %lu dup/s | Underflows: %lu/s | Overflows: %lu/s\n",
+            Serial.printf("[LINK STATUS] Mode: %s | Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Drift: %lu drop/s, %lu dup/s | Underflows: %lu/s | Overflows: %lu/s\n",
+                          config_low_latency_mode ? "Low-Latency" : "High-Quality",
                           primary_chan, frames, real_frames, fec_rec, silence, packets, buffered_bytes, buffer_ms, drops, dups, underflows, overflows);
         } else {
             Serial.printf("[IDLE] Waiting for Transmitter... Current Wi-Fi Chan: %d\n", primary_chan);
