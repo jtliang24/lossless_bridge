@@ -114,22 +114,22 @@ sequenceDiagram
 
 When editing code, do **NOT** undo these critical fixes:
 
-### 1. Wi-Fi Channel Lock Workaround (No-AP, Channel 11)
+### 1. Wi-Fi Channel Lock Workaround (No-AP, Channel 8)
 *   **The Issue**: ESP-NOW requires transmitter and receiver to be on the same radio channel. Setting this in station mode normally requires connecting to an AP, while running softAP mode consumes excessive radio airtime and causes packet dropouts.
-*   **The Workaround**: Initialize Wi-Fi in pure station mode (`WIFI_MODE_STA`), temporarily enable promiscuous mode, change the channel to **Channel 11**, and then disable promiscuous mode. This forces the radio lock without launching an AP.
+*   **The Workaround**: Initialize Wi-Fi in pure station mode (`WIFI_MODE_STA`), temporarily enable promiscuous mode, change the channel to **Channel 8** (selected via local 2.4 GHz spectrum scan to avoid local AP congestion on Channel 11), and then disable promiscuous mode. This forces the radio lock without launching an AP.
     *   **ESP-IDF Implementation** ([`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)):
         ```c
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_start());
         ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-        ESP_ERROR_CHECK(esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE));
+        ESP_ERROR_CHECK(esp_wifi_set_channel(8, WIFI_SECOND_CHAN_NONE));
         ESP_ERROR_CHECK(esp_wifi_set_promiscuous(false));
         ```
     *   **Arduino Implementation** ([`lossless_rx/src/main.cpp`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_rx/src/main.cpp)):
         ```cpp
         WiFi.mode(WIFI_STA);
         esp_wifi_set_promiscuous(true);
-        esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
+        esp_wifi_set_channel(8, WIFI_SECOND_CHAN_NONE);
         esp_wifi_set_promiscuous(false);
         ```
 
@@ -164,6 +164,10 @@ When editing code, do **NOT** undo these critical fixes:
 ### 6. USB Host Descriptor Caching Bypass (PID `0x8002`)
 *   **The Issue**: Windows and macOS cache USB descriptor tables. If the channel count, sample rate, or bit resolution are changed in firmware, the host OS ignores the changes and uses cached values, causing playback errors.
 *   **The Workaround**: Increment the USB Product ID (PID) to `0x8002` in [`usb_descriptors.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/usb_descriptors.c) whenever audio configurations are updated. This forces the host OS to recognize it as a brand-new device.
+
+### 7. ESP-IDF UAC ABI Layout Configuration & Core Pinning
+*   **The Issue**: The `usb_device_uac.h` header changes its struct layouts based on macros defined in `sdkconfig.h` (e.g. `CONFIG_USB_DEVICE_UAC_AS_PART`). If `sdkconfig.h` is not included at the top of code referencing UAC configuration, silent ABI layout mismatches will break callbacks.
+*   **The Workaround**: Always include `"sdkconfig.h"` before any other headers in transmitter files (e.g. [`lossless_tx/src/main.c`](file:///C:/Users/qingc/Projects/lossless_audio/lossless_tx/src/main.c)). Pin TinyUSB and UAC tasks to Core 0 (`CONFIG_UAC_TINYUSB_TASK_CORE=0`, `CONFIG_UAC_SPK_TASK_CORE=0`) in `sdkconfig.defaults`, and pin the receiver playback task to Core 1 with 8KB stack size.
 
 ### 8. High Quality (Bit-Exact) vs Low Latency Mode Flag & Hardware Switch Support
 *   **The Issue**: Resampling drift compensation locks buffer depth to ~35ms for gaming/movies, but can introduce micro-crackling during aggressive drops. Audiophiles desire pure, untouched 100% bit-exact 48kHz PCM audio playback.
@@ -202,7 +206,7 @@ When editing code, do **NOT** undo these critical fixes:
 ### Diagnostic Console Prints (Receiver)
 The receiver prints detailed link health statistics every 1 second over its serial interface:
 ```text
-[LINK STATUS] Mode: High-Quality | Chan: 8 | Frames: 100/s (100 real, 0 FEC, 0 silence) | Sub-pkts: 900/s (Exp: ~900) | Buffer: 5760 B (30.0 ms) | Drift: 0 drop/s, 0 dup/s | Underflows: 0/s | Overflows: 0/s
+[LINK STATUS] Mode: High-Quality | Chan: 8 | Frames: 100/s (100 real, 0 FEC, 0 silence) | Sub-pkts: 900/s (Exp: ~900) | Buffer: 36480 B (190.0 ms) | Drift: 0 drop/s, 0 dup/s | Underflows: 0/s | Overflows: 0/s
 ```
 *   **Active Mode**: `High-Quality` (pure bit-exact PCM) or `Low-Latency` (drift compensation enabled).
 *   **Expected Frames**: ~100/s (1 frame per 10ms).
@@ -243,4 +247,4 @@ Run from the repository root:
 1.  **Audio has Right-channel silence?** Check if `slot_bit_width` is explicitly configured to 16-bit in the receiver setup.
 2.  **Transmitter is unrecognized by PC Host?** Verify the USB PID in `lossless_tx/src/usb_descriptors.c` is set to `0x8002` (or incremented if configurations changed).
 3.  **Audible crackles or packet drops?** Check if the transmitter is bursting packets. Verify that it uses the sequential transmission path spacing instead of bursting.
-4.  **No link established?** Check if both boards have locked onto Wi-Fi **Channel 11** using the promiscuous mode workaround.
+4.  **No link established?** Check if both boards have locked onto Wi-Fi **Channel 8** using the promiscuous mode workaround.
