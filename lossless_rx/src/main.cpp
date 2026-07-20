@@ -429,6 +429,14 @@ void i2s_playback_task(void *pvParameters) {
                 size_t current_buffer = ring_buffer.available();
                 size_t written = 0;
 
+                // Instant flush excess buffer down to 35ms target (6720 B) when in Low Latency mode and buffer > 100ms
+                if (config_low_latency_mode && current_buffer > 19200) {
+                    while (ring_buffer.available() > 6720) {
+                        ring_buffer.read(raw_pcm_buf, FRAME_SIZE);
+                    }
+                    current_buffer = ring_buffer.available();
+                }
+
                 // Multi-tier drift scaling (Target: ~35ms / 6720 B) - Only active when config_low_latency_mode is true
                 if (config_low_latency_mode && current_buffer > 9600) {
                     int drop_count = 1;
@@ -600,7 +608,14 @@ void loop() {
         bool hardware_high = (digitalRead(MODE_SWITCH_PIN) == HIGH);
         if (hardware_high != config_low_latency_mode) {
             config_low_latency_mode = hardware_high;
-            Serial.printf("[MODE SWITCH] Hardware switch toggled on GPIO %d -> Active Mode: %s\n",
+            if (config_low_latency_mode) {
+                // Instant flush excess buffer down to 35ms target (6720 B)
+                static uint8_t flush_tmp[FRAME_SIZE];
+                while (ring_buffer.available() > 6720) {
+                    ring_buffer.read(flush_tmp, FRAME_SIZE);
+                }
+            }
+            Serial.printf("[MODE SWITCH] Hardware switch toggled on GPIO %d -> Active Mode: %s (Buffer flushed to 35ms)\n",
                           MODE_SWITCH_PIN, config_low_latency_mode ? "Low Latency (Drift Comp ON)" : "High Quality (Bit-Exact PCM)");
         }
     }
