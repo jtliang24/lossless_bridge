@@ -44,6 +44,8 @@ static uint32_t stats_sub_packets_received = 0;
 static uint32_t stats_underflows = 0;
 static uint32_t stats_buffer_overflows = 0;
 static uint32_t stats_silence_frames = 0;
+static uint32_t stats_samples_dropped = 0;
+static uint32_t stats_samples_duplicated = 0;
 static uint8_t sender_mac[6] = {0};
 static bool sender_known = false;
 
@@ -345,9 +347,25 @@ static esp_err_t init_i2s(void) {
     return i2s_channel_enable(tx_chan);
 }
 
+// Helper function to find zero-crossing sample index in 16-bit stereo PCM buffer
+static inline int find_zero_crossing(const int16_t* samples, int num_samples) {
+    int best_idx = 0;
+    int32_t min_amp = 0x7FFFFFFF;
+    for (int i = 0; i < num_samples; i++) {
+        int32_t amp = abs((int32_t)samples[i * 2]) + abs((int32_t)samples[i * 2 + 1]);
+        if (amp < min_amp) {
+            min_amp = amp;
+            best_idx = i;
+            if (amp == 0) break; // Perfect zero crossing found
+        }
+    }
+    return best_idx;
+}
+
 // Dedicated FreeRTOS I2S playback task pinned to Core 1
 void i2s_playback_task(void *pvParameters) {
-    static uint8_t out_buf[FRAME_SIZE];
+    // All buffers allocated statically in BSS memory to prevent task stack overflow
+    static uint8_t raw_pcm_buf[FRAME_SIZE + 32];
     static uint8_t conceal_buf[FRAME_SIZE];
     static uint8_t silence_buf[FRAME_SIZE] = {0};
     static bool has_last_good = false;
@@ -398,11 +416,70 @@ void i2s_playback_task(void *pvParameters) {
                 }
                 vTaskDelay(pdMS_TO_TICKS(2));
             } else {
-                size_t bytes_read = ring_buffer.read(out_buf, FRAME_SIZE);
-                memcpy(conceal_buf, out_buf, FRAME_SIZE);
-                has_last_good = true;
+                size_t current_buffer = ring_buffer.available();
                 size_t written = 0;
-                i2s_channel_write(tx_chan, out_buf, FRAME_SIZE, &written, portMAX_DELAY);
+
+                // Multi-tier drift scaling (Target: ~35ms / 6720 B)
+                // > 90ms (17280 B): Drop 3 samples/frame (max 3 samples/frame = ~6.25 ms/s drain rate)
+                // > 70ms (13440 B): Drop 2 samples/frame (~4.16 ms/s drain rate)
+                // > 50ms ( 9600 B): Drop 1 sample/frame  (~2.08 ms/s drain rate)
+                // < 25ms ( 4800 B): Duplicate 1 sample/frame
+                if (current_buffer > 9600) {
+                    int drop_count = 1;
+                    if (current_buffer > 17280) {
+                        drop_count = 3; // Max 3 samples/frame
+                    } else if (current_buffer > 13440) {
+                        drop_count = 2;
+                    }
+
+                    size_t read_bytes = FRAME_SIZE + (drop_count * 4); // Read extra samples from ring buffer
+                    size_t bytes_read = ring_buffer.read(raw_pcm_buf, read_bytes);
+                    if (bytes_read == read_bytes) {
+                        int16_t *pcm = (int16_t *)raw_pcm_buf;
+                        int samples_count = bytes_read / 4;
+                        for (int d = 0; d < drop_count; d++) {
+                            int drop_idx = find_zero_crossing(pcm, samples_count);
+                            memmove(&pcm[drop_idx * 2], &pcm[(drop_idx + 1) * 2], (samples_count - 1 - drop_idx) * 4);
+                            samples_count--;
+                        }
+                        // Output is ALWAYS exactly FRAME_SIZE (1,920 bytes) to match I2S DMA descriptors!
+                        memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
+                        has_last_good = true;
+                        i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                        stats_samples_dropped += drop_count;
+                    } else {
+                        memcpy(conceal_buf, raw_pcm_buf, bytes_read);
+                        has_last_good = true;
+                        i2s_channel_write(tx_chan, raw_pcm_buf, bytes_read, &written, portMAX_DELAY);
+                    }
+                } else if (current_buffer < 4800 && current_buffer >= (FRAME_SIZE - 4)) {
+                    // Duplicate 1 sample (read 479 samples = 1916 bytes, output 480 samples = 1920 bytes)
+                    size_t read_bytes = FRAME_SIZE - 4;
+                    size_t bytes_read = ring_buffer.read(raw_pcm_buf, read_bytes);
+                    if (bytes_read == read_bytes) {
+                        int16_t *pcm = (int16_t *)raw_pcm_buf;
+                        int dup_idx = find_zero_crossing(pcm, 479);
+                        // Shift right by 1 sample past dup_idx
+                        memmove(&pcm[(dup_idx + 2) * 2], &pcm[(dup_idx + 1) * 2], (479 - 1 - dup_idx) * 4);
+                        // Duplicate sample
+                        pcm[(dup_idx + 1) * 2]     = pcm[dup_idx * 2];
+                        pcm[(dup_idx + 1) * 2 + 1] = pcm[dup_idx * 2 + 1];
+                        
+                        memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
+                        has_last_good = true;
+                        i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                        stats_samples_duplicated++;
+                    } else {
+                        memcpy(conceal_buf, raw_pcm_buf, bytes_read);
+                        has_last_good = true;
+                        i2s_channel_write(tx_chan, raw_pcm_buf, bytes_read, &written, portMAX_DELAY);
+                    }
+                } else {
+                    size_t bytes_read = ring_buffer.read(raw_pcm_buf, FRAME_SIZE);
+                    memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
+                    has_last_good = true;
+                    i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
+                }
             }
         }
     }
@@ -483,11 +560,11 @@ void setup() {
         Serial.println("Failed to add broadcast peer!");
     }
 
-    // Launch Playback Task on Core 1
+    // Launch Playback Task on Core 1 (increased stack size to 8192 bytes for stability)
     xTaskCreatePinnedToCore(
         i2s_playback_task,
         "i2s_playback_task",
-        4096,
+        8192,
         NULL,
         configMAX_PRIORITIES - 1, // High priority
         NULL,
@@ -576,6 +653,8 @@ void loop() {
             uint32_t overflows = stats_buffer_overflows;
             uint32_t fec_rec = stats_fec_recoveries;
             uint32_t silence = stats_silence_frames;
+            uint32_t drops = stats_samples_dropped;
+            uint32_t dups = stats_samples_duplicated;
             uint32_t real_frames = (frames > fec_rec + silence) ? (frames - fec_rec - silence) : 0;
 
             // Reset stats counters
@@ -585,12 +664,14 @@ void loop() {
             stats_buffer_overflows = 0;
             stats_fec_recoveries = 0;
             stats_silence_frames = 0;
+            stats_samples_dropped = 0;
+            stats_samples_duplicated = 0;
 
             size_t buffered_bytes = ring_buffer.available();
             float buffer_ms = (float)buffered_bytes / 192.0f; // 48000 Hz * 2 channels * 2 bytes/sample = 192 bytes/ms
 
-            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Underflows: %lu/s | Overflows: %lu/s\n",
-                          primary_chan, frames, real_frames, fec_rec, silence, packets, buffered_bytes, buffer_ms, underflows, overflows);
+            Serial.printf("[LINK STATUS] Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Drift: %lu drop/s, %lu dup/s | Underflows: %lu/s | Overflows: %lu/s\n",
+                          primary_chan, frames, real_frames, fec_rec, silence, packets, buffered_bytes, buffer_ms, drops, dups, underflows, overflows);
         } else {
             Serial.printf("[IDLE] Waiting for Transmitter... Current Wi-Fi Chan: %d\n", primary_chan);
         }
