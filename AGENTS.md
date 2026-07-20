@@ -173,8 +173,9 @@ When editing code, do **NOT** undo these critical fixes:
 *   **The Issue**: Resampling drift compensation locks buffer depth to ~35ms for gaming/movies, but can introduce micro-crackling during aggressive drops. Audiophiles desire pure, untouched 100% bit-exact 48kHz PCM audio playback.
 *   **The Solution**: Place drift compensation behind a runtime flag `config_low_latency_mode`.
     *   **High Quality Mode (`ENABLE_DRIFT_COMPENSATION_DEFAULT = 0`)**: Pure 100% bit-exact 48kHz PCM playback. Zero sample drops, zero sample dups, zero crackles.
-    *   **Low Latency Mode (`ENABLE_DRIFT_COMPENSATION_DEFAULT = 1`)**: Zero-crossing drift compensation enabled, locking latency to ~35ms.
-    *   **Hardware Switch Pin (`MODE_SWITCH_PIN`)**: Assigning a GPIO pin (e.g. `GPIO_NUM_7`) with internal pull-up allows a physical toggle switch to dynamically switch between High Quality and Low Latency modes on the fly!
+    *   **Low Latency Mode (`ENABLE_DRIFT_COMPENSATION_DEFAULT = 1`)**: Zero-crossing drift compensation enabled, locking latency to ~35ms target.
+    *   **Hardware Switch Pin (`MODE_SWITCH_PIN = GPIO_NUM_7`)**: Configured with `INPUT_PULLDOWN` on GPIO 7 (D8 pin on Seeed Studio XIAO ESP32S3). Bridging GPIO 7 to `3.3V` (HIGH) dynamically activates Low-Latency Mode; disconnecting or bridging to `GND` (LOW) reverts to High-Quality Mode.
+    *   **Instant 35ms Buffer Flush**: When switching into Low-Latency Mode or when buffer depth exceeds 100ms in Low-Latency Mode, the receiver instantly discards excess stale frames down to 35ms (<1ms flush duration), bypassing slow drift draining.
 
 ---
 
@@ -185,7 +186,7 @@ When editing code, do **NOT** undo these critical fixes:
     *   `GPIO 4` (D3 Pin) -> **I2S BCLK** (Bit Clock / BCK)
     *   `GPIO 5` (D4 Pin) -> **I2S WS** (Word Select / LRCK)
     *   `GPIO 6` (D5 Pin) -> **I2S DOUT** (Data Output / DIN)
-*   **Mode Switch Pin (Optional)**: `MODE_SWITCH_PIN` (Default `-1`, set to e.g. `GPIO 7` for physical toggle switch).
+*   **Mode Switch Pin**: `GPIO 7` (D8 Pin) -> Hardware Mode Switch (Bridge to `3.3V` = Low Latency, `GND`/Open = High Quality).
 *   **Power & Ground**: Connect 3.3V or 5V to the DAC power, and connect GND common.
 
 ---
