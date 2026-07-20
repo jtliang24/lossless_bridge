@@ -23,9 +23,10 @@
 #define ENABLE_DRIFT_COMPENSATION_DEFAULT 0 
 static volatile bool config_low_latency_mode = (ENABLE_DRIFT_COMPENSATION_DEFAULT != 0);
 
-// Hardware Mode Switch Pin (Optional toggle switch: GND = High Quality, OPEN/HIGH = Low Latency)
-// Set to -1 to disable hardware pin reading and use static flag above
-#define MODE_SWITCH_PIN -1 // e.g. GPIO_NUM_7
+// Hardware Mode Switch Pin (GPIO 7 / D8 on Seeed Studio XIAO ESP32S3)
+// 3.3V / HIGH = Low-Latency Mode (~35ms target)
+// GND / LOW  = High-Quality Mode (Pure Bit-Exact 48kHz PCM)
+#define MODE_SWITCH_PIN GPIO_NUM_7 // D8 pin on Seeed Studio XIAO ESP32S3
 
 typedef struct __attribute__((packed)) {
     uint32_t seq_num;          // Incremented for every 10ms frame
@@ -565,6 +566,13 @@ void setup() {
         Serial.println("Failed to add broadcast peer!");
     }
 
+#if defined(MODE_SWITCH_PIN) && MODE_SWITCH_PIN >= 0
+    pinMode(MODE_SWITCH_PIN, INPUT_PULLDOWN);
+    config_low_latency_mode = (digitalRead(MODE_SWITCH_PIN) == HIGH);
+    Serial.printf("Hardware Mode Switch initialized on GPIO %d. Initial Mode: %s\n",
+                  MODE_SWITCH_PIN, config_low_latency_mode ? "Low Latency" : "High Quality");
+#endif
+
     // Launch Playback Task on Core 1 (increased stack size to 8192 bytes for stability)
     xTaskCreatePinnedToCore(
         i2s_playback_task,
@@ -582,7 +590,21 @@ void setup() {
 void loop() {
     static uint32_t last_beacon_time = 0;
     static uint32_t last_stats_time = 0;
+    static uint32_t last_switch_check = 0;
     uint32_t now = millis();
+
+#if defined(MODE_SWITCH_PIN) && MODE_SWITCH_PIN >= 0
+    // Poll physical mode switch pin every 100ms
+    if (now - last_switch_check >= 100) {
+        last_switch_check = now;
+        bool hardware_high = (digitalRead(MODE_SWITCH_PIN) == HIGH);
+        if (hardware_high != config_low_latency_mode) {
+            config_low_latency_mode = hardware_high;
+            Serial.printf("[MODE SWITCH] Hardware switch toggled on GPIO %d -> Active Mode: %s\n",
+                          MODE_SWITCH_PIN, config_low_latency_mode ? "Low Latency (Drift Comp ON)" : "High Quality (Bit-Exact PCM)");
+        }
+    }
+#endif
 
     // Flush incomplete frame if no sub-packet has arrived for > 15ms
     if (active_seq != 0xFFFFFFFF && received_mask > 0 && received_mask < 0xFF) {
