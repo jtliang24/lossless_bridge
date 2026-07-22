@@ -19,6 +19,11 @@
 #define VOLUME_UP_PIN   GPIO_NUM_1 // D0 pin on Seeed Studio XIAO ESP32S3
 #define VOLUME_DOWN_PIN GPIO_NUM_2 // D1 pin on Seeed Studio XIAO ESP32S3
 
+// Hardware Media Control Button (Active-Low with internal pull-up)
+// 1 Tap = Play/Pause, 2 Taps = Next Track (Skip), 3+ Taps = Prev Track (Back)
+#define MEDIA_BUTTON_PIN GPIO_NUM_3 // D2 pin on Seeed Studio XIAO ESP32S3
+
+
 #define AUDIO_PAYLOAD_SIZE    240
 #define SUB_PACKETS_PER_FRAME 8
 #define FRAME_SIZE            (AUDIO_PAYLOAD_SIZE * SUB_PACKETS_PER_FRAME) // 1920 bytes (480 stereo samples)
@@ -96,6 +101,12 @@ typedef struct __attribute__((packed)) {
     uint8_t receiver_mac[6];    // Receiver's MAC address in transmitter memory
     uint32_t seq_num;           // Sequence number
 } tx_confirm_packet_t;
+
+typedef struct __attribute__((packed)) {
+    char magic[8];             // "MEDIA_CTL"
+    uint8_t command;           // 1 = Play/Pause, 2 = Next Track, 3 = Prev Track
+} media_control_packet_t;
+
 
 // Statistics and connection tracking
 static uint32_t stats_frames_received = 0;
@@ -638,6 +649,8 @@ void setup() {
     // Volume buttons initialization
     pinMode(VOLUME_UP_PIN, INPUT_PULLUP);
     pinMode(VOLUME_DOWN_PIN, INPUT_PULLUP);
+    pinMode(MEDIA_BUTTON_PIN, INPUT_PULLUP);
+
 
     preferences.begin("audio_rx", false);
     volume_level = preferences.getUChar("volume", 20);
@@ -860,5 +873,55 @@ void loop() {
         Serial.printf("[VOLUME] Saved Level %d/20 (%d%%) to NVS.\n", volume_level, volume_level * 5);
     }
 
+    // Hardware Media Control Button handling (Multi-tap gesture: 1 Tap=Play/Pause, 2 Taps=Next Track, 3+ Taps=Prev Track)
+    static uint32_t media_last_press_time = 0;
+    static bool media_was_pressed = false;
+    static uint8_t media_tap_count = 0;
+    static uint32_t media_first_tap_release_time = 0;
+
+    bool media_pressed = (digitalRead(MEDIA_BUTTON_PIN) == LOW);
+
+    if (media_pressed) {
+        if (!media_was_pressed) {
+            if (now - media_last_press_time >= 30) { // 30ms debounce
+                media_was_pressed = true;
+                media_last_press_time = now;
+            }
+        }
+    } else {
+        if (media_was_pressed) {
+            media_was_pressed = false;
+            media_tap_count++;
+            if (media_tap_count == 1) {
+                media_first_tap_release_time = now;
+            }
+        }
+    }
+
+    // Evaluate multi-tap gesture after 350ms window expires following the first tap release
+    if (media_tap_count > 0 && (now - media_first_tap_release_time >= 350) && !media_pressed) {
+        uint8_t cmd = (media_tap_count == 1) ? 1 : ((media_tap_count == 2) ? 2 : 3);
+        const char *cmd_name = (cmd == 1) ? "Play/Pause" : ((cmd == 2) ? "Next Track" : "Prev Track");
+        Serial.printf("[MEDIA] Multi-tap gesture: %d tap(s) -> %s (cmd %d)\n", media_tap_count, cmd_name, cmd);
+
+        if (sender_known) {
+            media_control_packet_t media_pkt;
+            memcpy(media_pkt.magic, "MEDIA_CTL", 8);
+            media_pkt.command = cmd;
+            esp_err_t send_err = esp_now_send(sender_mac, (uint8_t *)&media_pkt, sizeof(media_control_packet_t));
+            if (send_err != ESP_OK) {
+                Serial.printf("[MEDIA] Failed to send media command: %s\n", esp_err_to_name(send_err));
+            } else {
+                Serial.printf("[MEDIA] Sent %s to transmitter %02X:%02X:%02X:%02X:%02X:%02X\n",
+                              cmd_name, sender_mac[0], sender_mac[1], sender_mac[2],
+                              sender_mac[3], sender_mac[4], sender_mac[5]);
+            }
+        } else {
+            Serial.println("[MEDIA] Cannot send media command: Transmitter unknown/not paired.");
+        }
+
+        media_tap_count = 0;
+    }
+
     delay(20);
-}
+}
