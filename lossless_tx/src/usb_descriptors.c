@@ -32,7 +32,7 @@
 #define CONFIG_UAC_TUSB_VID 0x303A
 #endif
 #ifndef CONFIG_UAC_TUSB_PID
-#define CONFIG_UAC_TUSB_PID 0x8002
+#define CONFIG_UAC_TUSB_PID 0x8003
 #endif
 #ifndef CONFIG_UAC_TUSB_MANUFACTURER
 #define CONFIG_UAC_TUSB_MANUFACTURER "Espressif"
@@ -52,8 +52,30 @@ enum {
 #if MIC_CHANNEL_NUM
     ITF_NUM_AUDIO_STREAMING_MIC,
 #endif // MIC_CHANNEL_NUM
+    ITF_NUM_HID,
     ITF_NUM_TOTAL
 };
+
+//--------------------------------------------------------------------+
+// HID Report Descriptor
+//--------------------------------------------------------------------+
+uint8_t const desc_hid_report[] = {
+    TUD_HID_REPORT_DESC_CONSUMER(HID_REPORT_ID(1))
+};
+
+uint8_t const * tud_hid_descriptor_report_cb(uint8_t instance) {
+    (void) instance;
+    return desc_hid_report;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen) {
+    (void) instance; (void) report_id; (void) report_type; (void) buffer; (void) reqlen;
+    return 0;
+}
+
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
+    (void) instance; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
+}
 
 //--------------------------------------------------------------------+
 // Device Descriptors
@@ -91,16 +113,19 @@ uint8_t const *tud_descriptor_device_cb(void)
 //--------------------------------------------------------------------+
 // Configuration Descriptor
 //--------------------------------------------------------------------+
-#define CONFIG_TOTAL_LEN        (TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO * TUD_AUDIO_DEVICE_DESC_LEN)
+#define CONFIG_TOTAL_LEN        (TUD_CONFIG_DESC_LEN + CFG_TUD_AUDIO * TUD_AUDIO_DEVICE_DESC_LEN + TUD_HID_DESC_LEN)
 #define EPNUM_AUDIO_OUT   0x01
 #define EPNUM_AUDIO_FB    0x81
 #define EPNUM_AUDIO_IN    0x82
+#define EPNUM_HID         0x83
 
 uint8_t const desc_configuration[] = {
     // Config number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
     // Interface number, string index, EP Out & EP In address, EP size
     TUD_AUDIO_DESCRIPTOR(ITF_NUM_AUDIO_CONTROL, 4, EPNUM_AUDIO_OUT, EPNUM_AUDIO_IN, EPNUM_AUDIO_FB),
+    // HID Consumer Control Interface
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 7, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), EPNUM_HID, CFG_TUD_HID_EP_BUFSIZE, 10)
 };
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
@@ -129,6 +154,7 @@ char const *string_desc_arr [] = {
 #if MIC_CHANNEL_NUM
     "microphone",                   // 6: Mic Interface
 #endif
+    "media control",               // 7: HID Media Control Interface
 };
 
 static uint16_t _desc_str[32];
@@ -168,3 +194,4 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
     return _desc_str;
 }
+

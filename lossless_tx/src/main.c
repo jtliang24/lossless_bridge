@@ -12,6 +12,7 @@
 #include "driver/gpio.h"
 #include "usb_device_uac.h"
 #include "esp_rom_sys.h"
+#include "class/hid/hid_device.h"
 
 static const char *TAG = "tx_main";
 
@@ -41,6 +42,21 @@ typedef struct __attribute__((packed)) {
     uint8_t receiver_mac[6];    // Receiver's MAC address in transmitter memory
     uint32_t seq_num;           // Sequence number
 } tx_confirm_packet_t;
+
+typedef struct __attribute__((packed)) {
+    char magic[8];             // "MEDIA_CTL"
+    uint8_t command;           // 1 = Play/Pause, 2 = Next Track, 3 = Prev Track
+} media_control_packet_t;
+
+static void send_hid_media_key(uint16_t key_code) {
+    if (tud_hid_ready()) {
+        tud_hid_report(1, &key_code, sizeof(key_code));
+        vTaskDelay(pdMS_TO_TICKS(20));
+        uint16_t zero = 0;
+        tud_hid_report(1, &zero, sizeof(zero));
+    }
+}
+
 
 static esp_timer_handle_t watchdog_timer = NULL;
 static bool stream_active = false;
@@ -131,8 +147,31 @@ static void periodic_test_task(void *pvParameters) {
     }
 }
 
-// Receive callback for pairing beacons
+// Receive callback for pairing beacons and media control commands
 static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+    if (len == sizeof(media_control_packet_t)) {
+        const media_control_packet_t *media_pkt = (const media_control_packet_t *)data;
+        if (memcmp(media_pkt->magic, "MEDIA_CTL", 8) == 0) {
+            uint16_t key_code = 0;
+            const char *cmd_str = "UNKNOWN";
+            if (media_pkt->command == 1) {
+                key_code = 0x00CD; // Play / Pause
+                cmd_str = "Play/Pause";
+            } else if (media_pkt->command == 2) {
+                key_code = 0x00B5; // Next Track (Skip)
+                cmd_str = "Next Track";
+            } else if (media_pkt->command == 3) {
+                key_code = 0x00B6; // Prev Track (Back)
+                cmd_str = "Prev Track";
+            }
+            if (key_code != 0) {
+                ESP_LOGI(TAG, "[MEDIA] Received command: %s (0x%04X)", cmd_str, key_code);
+                send_hid_media_key(key_code);
+            }
+            return;
+        }
+    }
+
     if (len == sizeof(beacon_packet_t)) {
         const beacon_packet_t *beacon = (const beacon_packet_t *)data;
         if (memcmp(beacon->magic, "LR_BEACN", 8) == 0) {
@@ -184,6 +223,7 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
         }
     }
 }
+
 
 // Callback for UAC audio data from PC host
 // NOTE: The UAC library calls this with ~192 bytes per invocation (1ms of audio
