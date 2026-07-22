@@ -65,6 +65,14 @@ typedef struct __attribute__((packed)) {
     uint8_t receiver_mac[6];   // Receiver MAC address
     uint32_t seq_num;          // Diagnostics sequence index
 } tx_confirm_packet_t;
+
+// Size: 9 bytes
+typedef struct __attribute__((packed)) {
+    char magic[8];             // "MEDIA_CTL"
+    uint8_t command;           // 1 = Play/Pause, 2 = Next Track (Skip), 3 = Prev Track (Back)
+} media_control_packet_t;
+```
+
 ```
 
 ### Pairing Handshake Sequence
@@ -189,7 +197,13 @@ When editing code, do **NOT** undo these critical fixes:
 *   **Hardware Volume Buttons**:
     *   `GPIO 1` (D0 Pin) -> **Volume Up Button** (Momentary Push Button, Active-Low / internal `INPUT_PULLUP` to GND)
     *   `GPIO 2` (D1 Pin) -> **Volume Down Button** (Momentary Push Button, Active-Low / internal `INPUT_PULLUP` to GND)
+*   **Media Control Button**:
+    *   `GPIO 3` (D2 Pin) -> **Multi-Tap Media Button** (Momentary Push Button, Active-Low / internal `INPUT_PULLUP` to GND)
+        *   **1 Tap**: Play / Pause
+        *   **2 Taps**: Next Track (Skip)
+        *   **3+ Taps**: Previous Track (Back)
 *   **Mode Switch Pin**: `GPIO 7` (D8 Pin) -> Hardware Mode Switch (Bridge to `3.3V` = Low Latency, `GND`/Open = High Quality).
+
 *   **Power & Ground**: Connect 3.3V or 5V to the DAC power, and connect GND common.
 
 ---
