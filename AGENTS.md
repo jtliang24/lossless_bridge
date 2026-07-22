@@ -186,6 +186,9 @@ When editing code, do **NOT** undo these critical fixes:
     *   `GPIO 4` (D3 Pin) -> **I2S BCLK** (Bit Clock / BCK)
     *   `GPIO 5` (D4 Pin) -> **I2S WS** (Word Select / LRCK)
     *   `GPIO 6` (D5 Pin) -> **I2S DOUT** (Data Output / DIN)
+*   **Hardware Volume Buttons**:
+    *   `GPIO 1` (D0 Pin) -> **Volume Up Button** (Momentary Push Button, Active-Low / internal `INPUT_PULLUP` to GND)
+    *   `GPIO 2` (D1 Pin) -> **Volume Down Button** (Momentary Push Button, Active-Low / internal `INPUT_PULLUP` to GND)
 *   **Mode Switch Pin**: `GPIO 7` (D8 Pin) -> Hardware Mode Switch (Bridge to `3.3V` = Low Latency, `GND`/Open = High Quality).
 *   **Power & Ground**: Connect 3.3V or 5V to the DAC power, and connect GND common.
 
