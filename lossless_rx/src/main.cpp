@@ -3,6 +3,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_arduino_version.h>
+#include <Preferences.h>
 #include "driver/i2s_std.h"
 #include "esp_mac.h"
 #define ENABLE_DEBUG_LOGS 0 // Set to 1 to enable verbose debugging
@@ -13,6 +14,10 @@
 #define I2S_BCLK_PIN GPIO_NUM_4 // D3
 #define I2S_WS_PIN   GPIO_NUM_5 // D4
 #define I2S_DOUT_PIN GPIO_NUM_6 // D5
+
+// Hardware Volume Buttons (Active-Low with internal pull-up)
+#define VOLUME_UP_PIN   GPIO_NUM_1 // D0 pin on Seeed Studio XIAO ESP32S3
+#define VOLUME_DOWN_PIN GPIO_NUM_2 // D1 pin on Seeed Studio XIAO ESP32S3
 
 #define AUDIO_PAYLOAD_SIZE    240
 #define SUB_PACKETS_PER_FRAME 8
@@ -27,6 +32,50 @@ static volatile bool config_low_latency_mode = (ENABLE_DRIFT_COMPENSATION_DEFAUL
 // 3.3V / HIGH = Low-Latency Mode (~35ms target)
 // GND / LOW  = High-Quality Mode (Pure Bit-Exact 48kHz PCM)
 #define MODE_SWITCH_PIN GPIO_NUM_7 // D8 pin on Seeed Studio XIAO ESP32S3
+
+// 21-step Logarithmic (Perceptual dB) Volume Table in Q15 format (0 to 32768)
+// Step 0 = 0% (Mute), Step 20 = 100% (0 dB, bit-exact throughput)
+static const uint16_t VOLUME_Q15_TABLE[21] = {
+    0,     // Level 0  (0%   / Mute)
+    328,   // Level 1  (5%   / -40 dB)
+    519,   // Level 2  (10%  / -36 dB)
+    822,   // Level 3  (15%  / -32 dB)
+    1302,  // Level 4  (20%  / -28 dB)
+    2064,  // Level 5  (25%  / -24 dB)
+    3271,  // Level 6  (30%  / -20 dB)
+    4621,  // Level 7  (35%  / -17 dB)
+    6529,  // Level 8  (40%  / -14 dB)
+    9222,  // Level 9  (45%  / -11 dB)
+    13028, // Level 10 (50%  / -8 dB)
+    15509, // Level 11 (55%  / -6.5 dB)
+    18461, // Level 12 (60%  / -5 dB)
+    20701, // Level 13 (65%  / -4 dB)
+    23214, // Level 14 (70%  / -3 dB)
+    26034, // Level 15 (75%  / -2 dB)
+    29195, // Level 16 (80%  / -1 dB)
+    30922, // Level 17 (85%  / -0.5 dB)
+    31823, // Level 18 (90%  / -0.25 dB)
+    32287, // Level 19 (95%  / -0.1 dB)
+    32768  // Level 20 (100% / 0 dB)
+};
+
+static volatile uint8_t volume_level = 20; // Default 100%
+static Preferences preferences;
+static bool volume_dirty = false;
+static uint32_t volume_last_change_time = 0;
+
+static inline void apply_volume_scaling(int16_t* samples, size_t num_samples) {
+    uint8_t lvl = volume_level;
+    if (lvl >= 20) return; // 100% volume, bit-exact throughput
+    uint32_t gain = VOLUME_Q15_TABLE[lvl];
+    if (gain == 0) {
+        memset(samples, 0, num_samples * sizeof(int16_t));
+        return;
+    }
+    for (size_t i = 0; i < num_samples; i++) {
+        samples[i] = (int16_t)(((int32_t)samples[i] * gain) >> 15);
+    }
+}
 
 typedef struct __attribute__((packed)) {
     uint32_t seq_num;          // Incremented for every 10ms frame
@@ -457,11 +506,13 @@ void i2s_playback_task(void *pvParameters) {
                             samples_count--;
                         }
                         // Output is ALWAYS exactly FRAME_SIZE (1,920 bytes) to match I2S DMA descriptors!
+                        apply_volume_scaling((int16_t*)raw_pcm_buf, FRAME_SIZE / 2);
                         memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
                         has_last_good = true;
                         i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
                         stats_samples_dropped += drop_count;
                     } else {
+                        apply_volume_scaling((int16_t*)raw_pcm_buf, bytes_read / 2);
                         memcpy(conceal_buf, raw_pcm_buf, bytes_read);
                         has_last_good = true;
                         i2s_channel_write(tx_chan, raw_pcm_buf, bytes_read, &written, portMAX_DELAY);
@@ -479,17 +530,20 @@ void i2s_playback_task(void *pvParameters) {
                         pcm[(dup_idx + 1) * 2]     = pcm[dup_idx * 2];
                         pcm[(dup_idx + 1) * 2 + 1] = pcm[dup_idx * 2 + 1];
                         
+                        apply_volume_scaling((int16_t*)raw_pcm_buf, FRAME_SIZE / 2);
                         memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
                         has_last_good = true;
                         i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
                         stats_samples_duplicated++;
                     } else {
+                        apply_volume_scaling((int16_t*)raw_pcm_buf, bytes_read / 2);
                         memcpy(conceal_buf, raw_pcm_buf, bytes_read);
                         has_last_good = true;
                         i2s_channel_write(tx_chan, raw_pcm_buf, bytes_read, &written, portMAX_DELAY);
                     }
                 } else {
                     size_t bytes_read = ring_buffer.read(raw_pcm_buf, FRAME_SIZE);
+                    apply_volume_scaling((int16_t*)raw_pcm_buf, bytes_read / 2);
                     memcpy(conceal_buf, raw_pcm_buf, FRAME_SIZE);
                     has_last_good = true;
                     i2s_channel_write(tx_chan, raw_pcm_buf, FRAME_SIZE, &written, portMAX_DELAY);
@@ -580,6 +634,15 @@ void setup() {
     Serial.printf("Hardware Mode Switch initialized on GPIO %d. Initial Mode: %s\n",
                   MODE_SWITCH_PIN, config_low_latency_mode ? "Low Latency" : "High Quality");
 #endif
+
+    // Volume buttons initialization
+    pinMode(VOLUME_UP_PIN, INPUT_PULLUP);
+    pinMode(VOLUME_DOWN_PIN, INPUT_PULLUP);
+
+    preferences.begin("audio_rx", false);
+    volume_level = preferences.getUChar("volume", 20);
+    if (volume_level > 20) volume_level = 20;
+    Serial.printf("Loaded Volume Level from NVS: %d/20 (%d%%)\n", volume_level, volume_level * 5);
 
     // Launch Playback Task on Core 1 (increased stack size to 8192 bytes for stability)
     xTaskCreatePinnedToCore(
@@ -712,12 +775,89 @@ void loop() {
             size_t buffered_bytes = ring_buffer.available();
             float buffer_ms = (float)buffered_bytes / 192.0f; // 48000 Hz * 2 channels * 2 bytes/sample = 192 bytes/ms
 
-            Serial.printf("[LINK STATUS] Mode: %s | Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Drift: %lu drop/s, %lu dup/s | Underflows: %lu/s | Overflows: %lu/s\n",
+            Serial.printf("[LINK STATUS] Mode: %s | Vol: %d%% (%d/20) | Chan: %d | Frames: %lu/s (%lu real, %lu FEC, %lu silence) | Sub-pkts: %lu/s (Exp: ~900) | Buffer: %zu B (%.1f ms) | Drift: %lu drop/s, %lu dup/s | Underflows: %lu/s | Overflows: %lu/s\n",
                           config_low_latency_mode ? "Low-Latency" : "High-Quality",
+                          volume_level * 5, volume_level,
                           primary_chan, frames, real_frames, fec_rec, silence, packets, buffered_bytes, buffer_ms, drops, dups, underflows, overflows);
         } else {
-            Serial.printf("[IDLE] Waiting for Transmitter... Current Wi-Fi Chan: %d\n", primary_chan);
+            Serial.printf("[IDLE] Waiting for Transmitter... Vol: %d%% (%d/20) | Current Wi-Fi Chan: %d\n", volume_level * 5, volume_level, primary_chan);
         }
+    }
+
+    // Hardware Volume Buttons handling (Polling with 30ms debounce, hold auto-repeat, and NVS save)
+    static uint32_t up_last_press_time = 0;
+    static uint32_t down_last_press_time = 0;
+    static bool up_was_pressed = false;
+    static bool down_was_pressed = false;
+    static uint32_t up_repeat_time = 0;
+    static uint32_t down_repeat_time = 0;
+
+    bool up_pressed = (digitalRead(VOLUME_UP_PIN) == LOW);
+    bool down_pressed = (digitalRead(VOLUME_DOWN_PIN) == LOW);
+    bool volume_changed = false;
+
+    if (up_pressed) {
+        if (!up_was_pressed) {
+            if (now - up_last_press_time >= 30) {
+                up_was_pressed = true;
+                up_last_press_time = now;
+                up_repeat_time = now + 400; // Hold delay 400ms
+                if (volume_level < 20) {
+                    volume_level = volume_level + 1;
+                    volume_changed = true;
+                }
+            }
+        } else {
+            if (now >= up_repeat_time) {
+                up_repeat_time = now + 150; // Repeat interval 150ms
+                if (volume_level < 20) {
+                    volume_level = volume_level + 1;
+                    volume_changed = true;
+                }
+            }
+        }
+    } else {
+        up_was_pressed = false;
+    }
+
+    if (down_pressed) {
+        if (!down_was_pressed) {
+            if (now - down_last_press_time >= 30) {
+                down_was_pressed = true;
+                down_last_press_time = now;
+                down_repeat_time = now + 400; // Hold delay 400ms
+                if (volume_level > 0) {
+                    volume_level = volume_level - 1;
+                    volume_changed = true;
+                }
+            }
+        } else {
+            if (now >= down_repeat_time) {
+                down_repeat_time = now + 150; // Repeat interval 150ms
+                if (volume_level > 0) {
+                    volume_level = volume_level - 1;
+                    volume_changed = true;
+                }
+            }
+        }
+    } else {
+        down_was_pressed = false;
+    }
+
+    if (volume_changed) {
+        volume_dirty = true;
+        volume_last_change_time = now;
+        Serial.printf("[VOLUME] %s -> Level %d/20 (%d%%) | Gain Q15: %u\n",
+                      (up_pressed ? "Up" : "Down"),
+                      volume_level,
+                      volume_level * 5,
+                      VOLUME_Q15_TABLE[volume_level]);
+    }
+
+    if (volume_dirty && (now - volume_last_change_time >= 1000)) {
+        volume_dirty = false;
+        preferences.putUChar("volume", volume_level);
+        Serial.printf("[VOLUME] Saved Level %d/20 (%d%%) to NVS.\n", volume_level, volume_level * 5);
     }
 
     delay(20);
